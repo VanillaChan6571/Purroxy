@@ -68,12 +68,33 @@ public final class ServerCommand {
                   builder.suggest(serverName);
                 }
               }
+              if (server instanceof com.velocitypowered.proxy.VelocityServer proxy
+                  && proxy.getDiscovery() != null) {
+                for (String group : proxy.getDiscovery().groups()) {
+                  if (group.regionMatches(true, 0, argument, 0, argument.length())) {
+                    builder.suggest(group);
+                  }
+                }
+              }
               return builder.buildFuture();
             })
             .executes(ctx -> {
               final Player player = (Player) ctx.getSource();
               // Trying to connect to a server.
               final String serverName = StringArgumentType.getString(ctx, SERVER_ARG);
+              if (server instanceof com.velocitypowered.proxy.VelocityServer proxy
+                  && proxy.getDiscovery() != null && proxy.getDiscovery().groups()
+                      .contains(serverName.toLowerCase(java.util.Locale.ROOT))) {
+                proxy.getDiscovery().connectGroup(player, serverName,
+                    proxy.getDiscovery().preferredRegion(player.getUniqueId()))
+                    .whenComplete((success, failure) -> {
+                      if (failure != null || !Boolean.TRUE.equals(success)) {
+                        player.sendMessage(Component.text("No available connection to group "
+                            + serverName + ". Please try again shortly.", NamedTextColor.RED));
+                      }
+                    });
+                return Command.SINGLE_SUCCESS;
+              }
               final Optional<RegisteredServer> toConnect = server.getServer(serverName);
               if (toConnect.isEmpty()) {
                 player.sendMessage(CommandMessages.SERVER_DOES_NOT_EXIST
@@ -121,6 +142,15 @@ public final class ServerCommand {
     }
 
     executor.sendMessage(serverListBuilder.build());
+    if (server instanceof com.velocitypowered.proxy.VelocityServer proxy
+        && proxy.getDiscovery() != null && !proxy.getDiscovery().groups().isEmpty()) {
+      TextComponent.Builder groups = Component.text("Groups: ", NamedTextColor.YELLOW).toBuilder();
+      for (String group : proxy.getDiscovery().groups().stream().sorted().toList()) {
+        groups.append(Component.text(group + " ", NamedTextColor.GRAY)
+            .clickEvent(ClickEvent.runCommand("/server " + group)));
+      }
+      executor.sendMessage(groups.build());
+    }
   }
 
   private static TextComponent formatServerComponent(final String currentPlayerServer,

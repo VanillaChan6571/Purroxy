@@ -1,0 +1,25 @@
+# Backend discovery is opt-in until certificates and backend identities are provisioned.
+format-version = 1
+fallback = ["hub"]
+
+[forced-hosts]
+# "play.example.com" = ["hub"]
+
+[discovery]
+enabled = false
+# Control handshakes share the Minecraft listener (default 25565).
+certificate-file = "purroxy.crt"
+private-key-file = "purroxy.key"
+backend-ca-file = "backends-ca.crt"
+
+[groups.hub]
+handoff-mode = "off" # Opt in with normal or seamless-preferred; required refuses unqualified continuity.
+
+# One identity per backend. Obtain the SHA-256 fingerprint from its certificate.
+# Membership comes from the authenticated resume, not a manually maintained member list.
+[backend-identities]
+# [backend-identities.hub-1]
+# certificate-sha256 = "REPLACE_WITH_CERTIFICATE_SHA256"
+# host = "10.0.0.11"
+# port = 25565
+# allowed-game-modes = ["hub"]

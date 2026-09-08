@@ -175,6 +175,11 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
   private final VelocityScheduler scheduler;
   private final VelocityChannelRegistrar channelRegistrar = new VelocityChannelRegistrar();
   private final ServerListPingHandler serverListPingHandler;
+  private com.velocitypowered.proxy.network.discovery.@Nullable DiscoveryService discovery;
+
+  public com.velocitypowered.proxy.network.discovery.@Nullable DiscoveryService getDiscovery() {
+    return discovery;
+  }
 
   VelocityServer(final ProxyOptions options) {
     pluginManager = new VelocityPluginManager(this);
@@ -280,6 +285,10 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
         serverCommand
     );
     final BrigadierCommand shutdownCommand = ShutdownCommand.command(this);
+    final BrigadierCommand regionCommand =
+        com.velocitypowered.proxy.command.builtin.RegionCommand.create(this);
+    commandManager.register(commandManager.metaBuilder(regionCommand)
+        .plugin(VelocityVirtualPlugin.INSTANCE).build(), regionCommand);
     commandManager.register(
         commandManager.metaBuilder(shutdownCommand)
             .plugin(VelocityVirtualPlugin.INSTANCE)
@@ -291,6 +300,14 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
     new SendCommand(this).register();
 
     this.doStartupConfigLoad();
+
+    try {
+      com.velocitypowered.proxy.network.discovery.DiscoveryConfiguration.read(
+          Path.of("purroxy-network.toml")).ifPresent(config -> discovery =
+              new com.velocitypowered.proxy.network.discovery.DiscoveryService(this, config));
+    } catch (IOException failure) {
+      throw new IllegalStateException("Unable to initialize Purroxy discovery", failure);
+    }
 
     registerTranslations();
 
@@ -578,6 +595,9 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
     }
 
     Runnable shutdownProcess = () -> {
+      if (discovery != null) {
+        discovery.close();
+      }
       logger.info("Shutting down the proxy...");
 
       // Shutdown the connection manager, this should be

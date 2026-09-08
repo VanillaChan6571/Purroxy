@@ -191,6 +191,7 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   private final Collection<ChannelIdentifier> clientsideChannels;
   private final CompletableFuture<Void> teardownFuture = new CompletableFuture<>();
   private @MonotonicNonNull List<String> serversToTry = null;
+  private final Set<String> discoveryServersTried = new java.util.HashSet<>();
   private final ResourcePackHandler resourcePackHandler;
   private final BundleDelimiterHandler bundleHandler = new BundleDelimiterHandler(this);
 
@@ -869,6 +870,23 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
    * @return the next server to try
    */
   private Optional<RegisteredServer> getNextServerToTry(@Nullable RegisteredServer current) {
+    if (server.getDiscovery() != null) {
+      Set<String> excluded = new java.util.HashSet<>(discoveryServersTried);
+      if (connectedServer != null) {
+        excluded.add(connectedServer.getServerInfo().getName().toLowerCase(Locale.ROOT));
+      }
+      if (connectionInFlight != null) {
+        excluded.add(connectionInFlight.getServerInfo().getName().toLowerCase(Locale.ROOT));
+      }
+      if (current != null) {
+        excluded.add(current.getServerInfo().getName().toLowerCase(Locale.ROOT));
+      }
+      Optional<RegisteredServer> next = server.getDiscovery().nextFallback(this,
+          getVirtualHost().map(InetSocketAddress::getHostString).orElse(""), excluded);
+      next.ifPresent(destination -> discoveryServersTried.add(
+          destination.getServerInfo().getName().toLowerCase(Locale.ROOT)));
+      return next;
+    }
     if (serversToTry == null) {
       String virtualHostStr = getVirtualHost().map(InetSocketAddress::getHostString)
           .orElse("")
@@ -912,6 +930,9 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   public void setConnectedServer(@Nullable VelocityServerConnection serverConnection) {
     this.connectedServer = serverConnection;
     this.tryIndex = 0; // reset since we got connected to a server
+    if (serverConnection != null) {
+      discoveryServersTried.clear();
+    }
 
     if (serverConnection == connectionInFlight) {
       connectionInFlight = null;
@@ -937,6 +958,9 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   }
 
   void teardown() {
+    if (server.getDiscovery() != null) {
+      server.getDiscovery().cancel(getUniqueId());
+    }
     if (connectionInFlight != null) {
       connectionInFlight.disconnect();
     }
@@ -1479,12 +1503,39 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
             return completedFuture(plainResult(check.get(), realDestination));
           }
 
+          com.velocitypowered.proxy.network.discovery.DiscoveryService discovery = server.getDiscovery();
+          com.velocitypowered.proxy.network.discovery.DiscoveryService.Admission admission;
+          if (discovery != null) {
+            admission = discovery.begin(getUniqueId(), realDestination)
+                .orElse(null);
+            if (admission == null) {
+              return completedFuture(com.velocitypowered.proxy.connection.util.ConnectionRequestResults.forDisconnect(
+                  Component.text("This server is not ready or has reached its player limit."),
+                  realDestination));
+            }
+          } else {
+            admission = null;
+          }
+
           VelocityRegisteredServer vrs = (VelocityRegisteredServer) realDestination;
           VelocityServerConnection con =
               new VelocityServerConnection(vrs, previousServer, ConnectedPlayer.this, server);
           connectionInFlight = con;
 
-          return con.connect().whenCompleteAsync((result, exception) -> {
+          CompletableFuture<Impl> attempt;
+          try {
+            attempt = con.connect();
+          } catch (RuntimeException failure) {
+            if (discovery != null && admission != null) {
+              discovery.finish(admission);
+            }
+            this.resetIfInFlightIs(con);
+            return CompletableFuture.failedFuture(failure);
+          }
+          return attempt.whenCompleteAsync((result, exception) -> {
+            if (discovery != null && admission != null) {
+              discovery.finish(admission);
+            }
             if (result != null && !result.isSuccessful() && !result.isSafe()) {
               handleConnectionException(result.getAttemptedConnection(),
                   // The only way for the reason to be null is if the result is safe

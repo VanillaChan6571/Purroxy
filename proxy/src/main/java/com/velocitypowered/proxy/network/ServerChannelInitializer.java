@@ -58,12 +58,28 @@ public class ServerChannelInitializer extends ChannelInitializer<Channel> {
 
   @Override
   protected void initChannel(final Channel ch) {
+    ch.pipeline().addLast(READ_TIMEOUT,
+        new ReadTimeoutHandler(this.server.getConfiguration().getReadTimeout(), TimeUnit.MILLISECONDS));
+    if (this.server.getConfiguration().isProxyProtocol()) {
+      ch.pipeline().addFirst(new HAProxyMessageDecoder());
+    }
+    com.velocitypowered.proxy.network.discovery.DiscoveryService discovery = server.getDiscovery();
+    if (discovery != null) {
+      ch.pipeline().addLast("purroxy-discriminator",
+          new com.velocitypowered.proxy.network.discovery.DiscoveryHandshakeDecoder(
+              discovery::initialize, channel -> {
+                initializeMinecraft(channel);
+                channel.pipeline().fireChannelActive();
+              }));
+    } else {
+      initializeMinecraft(ch);
+    }
+  }
+
+  private void initializeMinecraft(final Channel ch) {
     ch.pipeline()
         .addLast(LEGACY_PING_DECODER, new LegacyPingDecoder())
         .addLast(FRAME_DECODER, new MinecraftVarintFrameDecoder(ProtocolUtils.Direction.SERVERBOUND))
-        .addLast(READ_TIMEOUT,
-            new ReadTimeoutHandler(this.server.getConfiguration().getReadTimeout(),
-                TimeUnit.MILLISECONDS))
         .addLast(LEGACY_PING_ENCODER, LegacyPingEncoder.INSTANCE)
         .addLast(FRAME_ENCODER, MinecraftVarintLengthEncoder.INSTANCE)
         .addLast(MINECRAFT_DECODER, new MinecraftDecoder(ProtocolUtils.Direction.SERVERBOUND))
@@ -84,9 +100,6 @@ public class ServerChannelInitializer extends ChannelInitializer<Channel> {
       ch.pipeline().get(MinecraftVarintFrameDecoder.class).setPacketLimiter(
           new SimpleBytesPerSecondLimiter(configuredPacketsPerSecond, configuredBytes, configuredInterval)
       );
-    }
-    if (this.server.getConfiguration().isProxyProtocol()) {
-      ch.pipeline().addFirst(new HAProxyMessageDecoder());
     }
   }
 }

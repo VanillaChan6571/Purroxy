@@ -94,6 +94,15 @@ public class TransitionSessionHandler implements MinecraftSessionHandler {
     final ConnectedPlayer player = serverConn.getPlayer();
     final VelocityServerConnection existingConnection = player.getConnectedServer();
 
+    if (server.getDiscovery() != null && !server.getDiscovery().canComplete(
+        player.getUniqueId(), serverConn.getServerInfo().getName())) {
+      serverConn.disconnect();
+      resultFuture.complete(ConnectionRequestResults.forDisconnect(
+          net.kyori.adventure.text.Component.text("The destination is no longer available."),
+          serverConn.getServer()));
+      return true;
+    }
+
     if (existingConnection != null) {
       // Shut down the existing server connection.
       player.setConnectedServer(null);

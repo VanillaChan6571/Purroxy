@@ -8,7 +8,8 @@ apply<SpotlessPlugin>()
 // merges from upstream/dev never conflict on a copyright line.
 val nekoSources = arrayOf(
     "src/*/java/com/velocitypowered/proxy/network/discovery/**/*.java",
-    "src/*/java/com/velocitypowered/proxy/command/builtin/RegionCommand.java"
+    "src/*/java/com/velocitypowered/proxy/command/builtin/RegionCommand.java",
+    "src/*/java/com/velocitypowered/proxy/command/builtin/PurroxyCommand.java"
 )
 
 extensions.configure<SpotlessExtension> {

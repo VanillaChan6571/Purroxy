@@ -34,11 +34,15 @@ import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Single-proxy coordinator. The persisted decision, not an RPC timeout, determines ownership. */
 public final class HandoffCoordinator implements AutoCloseable {
+  /** An authenticated backend incarnation and its advertised replica contract. */
   public record Peer(String name, UUID session, HandoffCapabilities capabilities) {}
+
+  /** Identifies the committed transaction associated with a connection attempt. */
   public record Ticket(UUID player, UUID transfer, long generation, String destination) {}
 
   interface Transport {
     Optional<Peer> current(String name);
+
     CompletableFuture<JsonObject> request(Peer peer, JsonObject request);
   }
 
@@ -46,6 +50,8 @@ public final class HandoffCoordinator implements AutoCloseable {
   private final HandoffStore store;
   private final Transport transport;
   private final Set<UUID> active = ConcurrentHashMap.newKeySet();
+  private final Set<UUID> rolledBackSources = ConcurrentHashMap.newKeySet();
+  private final java.util.Map<UUID, Ticket> pendingReleases = new ConcurrentHashMap<>();
   private final ExecutorService io = Executors.newSingleThreadExecutor(task -> {
     Thread thread = new Thread(task, "purroxy-handoff-journal");
     thread.setDaemon(true);
@@ -64,6 +70,13 @@ public final class HandoffCoordinator implements AutoCloseable {
         ? Optional.of(transfer.destination()) : Optional.empty();
   }
 
+  /** A lost fence acknowledgment cannot be treated as permission to keep playing on the source. */
+  public boolean requiresRecovery(UUID player) {
+    HandoffStore.Transfer transfer = store.get(player);
+    return transfer != null && (transfer.phase() == HandoffStore.Phase.COMMITTED
+        || transfer.phase() == HandoffStore.Phase.ABORTED && !rolledBackSources.contains(transfer.id()));
+  }
+
   /** Executes export, stage, source fence, durable commit, then destination commit. */
   public CompletableFuture<@Nullable Ticket> prepare(UUID player, @Nullable String source, String destination,
                                                      String mode, BooleanSupplier valid, Executor playerLoop) {
@@ -73,13 +86,29 @@ public final class HandoffCoordinator implements AutoCloseable {
     HandoffStore.Transfer previous = store.get(player);
     if (source == null) {
       return recoverLogin(previous, destination).whenComplete((ticket, failure) -> {
-        if (ticket == null || failure != null) active.remove(player);
+        if (ticket == null || failure != null) {
+          active.remove(player);
+        }
       });
     }
     if (previous != null && previous.phase() == HandoffStore.Phase.COMMITTED) {
       active.remove(player);
       return CompletableFuture.failedFuture(new IllegalStateException("Previous committed handoff needs recovery"));
     }
+    if (previous != null && previous.phase() == HandoffStore.Phase.ABORTED) {
+      return rollback(previous).thenCompose(ignored -> {
+        return prepareActive(player, source, destination, mode, valid, playerLoop);
+      }).whenComplete((ticket, failure) -> {
+        if (failure != null) {
+          active.remove(player);
+        }
+      });
+    }
+    return prepareActive(player, source, destination, mode, valid, playerLoop);
+  }
+
+  private CompletableFuture<@Nullable Ticket> prepareActive(UUID player, String source, String destination,
+      String mode, BooleanSupplier valid, Executor playerLoop) {
     Optional<Peer> from = transport.current(source);
     Optional<Peer> to = transport.current(destination);
     if (mode.equals("off") || from.isEmpty() || to.isEmpty()
@@ -96,9 +125,7 @@ public final class HandoffCoordinator implements AutoCloseable {
     }
     Peer origin = from.get();
     Peer target = to.get();
-    CompletableFuture<Void> cleanup = previous != null && previous.phase() == HandoffStore.Phase.ABORTED
-        ? rollback(previous) : CompletableFuture.completedFuture(null);
-    return cleanup.thenCompose(ignored -> onIo(() -> store.begin(player, source, destination, System.currentTimeMillis() + 25000)))
+    return onIo(() -> store.begin(player, source, destination, System.currentTimeMillis() + 25000))
         .thenCompose(transfer -> call(origin, transfer, "export").thenCompose(reply -> {
           JsonObject entry = expect(reply, transfer, "SOURCE", "EXPORTED");
           HubPosition position = GSON.fromJson(entry.get("snapshot"), HubPosition.class);
@@ -124,11 +151,15 @@ public final class HandoffCoordinator implements AutoCloseable {
           return ticket(transfer);
         }))
         .exceptionallyCompose(failure -> abortBeforeCommit(player).handle((ignored, abortFailure) -> {
-          if (abortFailure != null) failure.addSuppressed(abortFailure);
+          if (abortFailure != null) {
+            failure.addSuppressed(abortFailure);
+          }
           throw new java.util.concurrent.CompletionException(failure);
         }))
         .whenComplete((ticket, failure) -> {
-          if (failure != null) active.remove(player);
+          if (failure != null) {
+            active.remove(player);
+          }
         });
   }
 
@@ -155,7 +186,7 @@ public final class HandoffCoordinator implements AutoCloseable {
 
   private CompletableFuture<Void> rollback(HandoffStore.Transfer transfer) {
     // The ABORT decision was forced to disk before either of these messages is sent.
-    return abortPeer(transfer.source(), transfer, "SOURCE")
+    return abortPeer(transfer.source(), transfer, "SOURCE").thenRun(() -> rolledBackSources.add(transfer.id()))
         .thenCompose(ignored -> abortPeer(transfer.destination(), transfer, "DESTINATION"));
   }
 
@@ -179,7 +210,7 @@ public final class HandoffCoordinator implements AutoCloseable {
     });
   }
 
-  private CompletableFuture<@Nullable Ticket> recoverLogin(@Nullable HandoffStore.Transfer transfer, String destination) {
+  private CompletableFuture<@Nullable Ticket> recoverLogin(HandoffStore.@Nullable Transfer transfer, String destination) {
     if (transfer == null || transfer.phase() == HandoffStore.Phase.COMPLETE) {
       return CompletableFuture.completedFuture(null);
     }
@@ -214,7 +245,8 @@ public final class HandoffCoordinator implements AutoCloseable {
   /** Releases the fenced source only after the destination became the live connection. */
   public CompletableFuture<Void> finish(Ticket ticket, boolean connected) {
     HandoffStore.Transfer transfer = store.get(ticket.player());
-    if (transfer == null || !transfer.id().equals(ticket.transfer())) {
+    if (transfer == null || !transfer.id().equals(ticket.transfer())
+        || transfer.generation() != ticket.generation() || !transfer.destination().equals(ticket.destination())) {
       active.remove(ticket.player());
       return CompletableFuture.failedFuture(new IllegalStateException("Superseded handoff completion"));
     }
@@ -222,6 +254,7 @@ public final class HandoffCoordinator implements AutoCloseable {
       active.remove(ticket.player());
       return CompletableFuture.completedFuture(null); // COMMITTED remains recoverable; never roll it back.
     }
+    pendingReleases.put(ticket.player(), ticket);
     Peer source = transport.current(transfer.source()).orElse(null);
     if (source == null) {
       active.remove(ticket.player());
@@ -230,7 +263,19 @@ public final class HandoffCoordinator implements AutoCloseable {
     return call(source, transfer, "release").thenCompose(reply -> {
       expect(reply, transfer, "SOURCE", "RELEASED");
       return onIo(() -> store.update(transfer.withPhase(HandoffStore.Phase.COMPLETE)));
-    }).thenAccept(ignored -> {}).whenComplete((ignored, failure) -> active.remove(ticket.player()));
+    }).thenAccept(ignored -> pendingReleases.remove(ticket.player(), ticket))
+        .whenComplete((ignored, failure) -> active.remove(ticket.player()));
+  }
+
+  /** Retries releases whose destination connection already succeeded in this proxy process. */
+  public CompletableFuture<Void> retryReleases() {
+    java.util.List<CompletableFuture<Void>> attempts = new java.util.ArrayList<>();
+    for (Ticket ticket : java.util.List.copyOf(pendingReleases.values())) {
+      if (active.add(ticket.player())) {
+        attempts.add(finish(ticket, true).exceptionally(failure -> null));
+      }
+    }
+    return CompletableFuture.allOf(attempts.toArray(CompletableFuture[]::new));
   }
 
   private CompletableFuture<JsonObject> call(Peer peer, HandoffStore.Transfer transfer, String action) {
@@ -244,7 +289,9 @@ public final class HandoffCoordinator implements AutoCloseable {
     request.addProperty("profile", "hub-position");
     request.addProperty("expiresAtMillis", transfer.phase() == HandoffStore.Phase.COMMITTED
         ? System.currentTimeMillis() + 25000 : transfer.expiresAtMillis());
-    if (transfer.position() != null) request.add("snapshot", GSON.toJsonTree(transfer.position()));
+    if (transfer.position() != null) {
+      request.add("snapshot", GSON.toJsonTree(transfer.position()));
+    }
     return transport.request(peer, request);
   }
 
@@ -272,8 +319,11 @@ public final class HandoffCoordinator implements AutoCloseable {
 
   private <T> CompletableFuture<T> onIo(IoSupplier<T> operation) {
     return CompletableFuture.supplyAsync(() -> {
-      try { return operation.get(); }
-      catch (Exception failure) { throw new java.util.concurrent.CompletionException(failure); }
+      try {
+        return operation.get();
+      } catch (Exception failure) {
+        throw new java.util.concurrent.CompletionException(failure);
+      }
     }, io);
   }
 

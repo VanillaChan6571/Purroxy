@@ -31,11 +31,25 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Validated discovery trust and routing policy, loaded before opening listeners. */
 public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> identities,
                                      SslContext tls, List<String> fallback,
-                                     Map<String, List<String>> forcedHosts, Map<String, String> handoffModes) {
+                                     Map<String, List<String>> forcedHosts, Map<String, String> handoffModes,
+                                     @Nullable PairingStore pairing) {
+
+  /** Keeps existing certificate-pinned configurations compatible. */
+  public DiscoveryConfiguration(Set<String> groups, Map<String, Identity> identities, SslContext tls,
+      List<String> fallback, Map<String, List<String>> forcedHosts, Map<String, String> handoffModes) {
+    this(groups, identities, tls, fallback, forcedHosts, handoffModes, null);
+  }
+
+  /** Resolves manually provisioned or automatically paired backend identities. */
+  public @Nullable Identity identity(String name) {
+    Identity configured = identities.get(name);
+    return configured != null || pairing == null ? configured : pairing.identity(name);
+  }
 
   /** Existing discovery policies keep handoff disabled unless explicitly configured. */
   public DiscoveryConfiguration(Set<String> groups, Map<String, Identity> identities, SslContext tls,
@@ -63,6 +77,9 @@ public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> i
     }
     Set<String> destinations = new java.util.HashSet<>(groups);
     destinations.addAll(identities.keySet());
+    if (pairing != null) {
+      destinations.addAll(pairing.names());
+    }
     java.util.stream.Stream.concat(fallback.stream(),
         forcedHosts.values().stream().flatMap(List::stream)).forEach(route -> {
           if (!destinations.contains(route)) {
@@ -109,7 +126,7 @@ public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> i
       }
       UnmodifiableConfig identityConfig = config.get("backend-identities");
       Map<String, Identity> identities = new HashMap<>();
-      for (var entry : identityConfig.valueMap().entrySet()) {
+      for (var entry : (identityConfig == null ? Map.<String, Object>of() : identityConfig.valueMap()).entrySet()) {
         UnmodifiableConfig identity = (UnmodifiableConfig) entry.getValue();
         String fingerprint = identity.get("certificate-sha256");
         if (fingerprint == null || !fingerprint.matches("[a-fA-F0-9]{64}")) {
@@ -130,11 +147,25 @@ public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> i
         identities.put(name, new Identity(fingerprint, host, port, allowedGroups));
       }
       Path base = path.toAbsolutePath().getParent();
-      SslContext tls = SslContextBuilder.forServer(
+      String authentication = config.getOrElse("discovery.authentication", "certificates");
+      PairingStore pairing = null;
+      SslContext tls;
+      if (authentication.equals("pairing")) {
+        if (!identities.isEmpty()) {
+          throw new IllegalArgumentException("Manual backend identities require authentication = certificates");
+        }
+        PairingStore.Provisioned provisioned = PairingStore.provision(base.resolve("purroxy-pairing"));
+        pairing = provisioned.store();
+        tls = provisioned.tls();
+      } else if (authentication.equals("certificates")) {
+        tls = SslContextBuilder.forServer(
               base.resolve((String) config.get("discovery.certificate-file")).toFile(),
               base.resolve((String) config.get("discovery.private-key-file")).toFile())
           .trustManager(base.resolve((String) config.get("discovery.backend-ca-file")).toFile())
           .clientAuth(ClientAuth.REQUIRE).protocols("TLSv1.3").build();
+      } else {
+        throw new IllegalArgumentException("Unknown discovery authentication mode");
+      }
       List<String> fallback = config.getOrElse("fallback", groups.stream().sorted().toList());
       fallback = fallback.stream().map(s -> s.toLowerCase(Locale.ROOT)).toList();
       Map<String, List<String>> forcedHosts = new HashMap<>();
@@ -146,7 +177,7 @@ public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> i
               .map(value -> ((String) value).toLowerCase(Locale.ROOT)).toList());
         }
       }
-      return java.util.Optional.of(new DiscoveryConfiguration(groups, identities, tls, fallback, forcedHosts, handoffModes));
+      return java.util.Optional.of(new DiscoveryConfiguration(groups, identities, tls, fallback, forcedHosts, handoffModes, pairing));
     } catch (RuntimeException exception) {
       throw new IOException("Invalid discovery configuration: " + exception.getMessage(), exception);
     }

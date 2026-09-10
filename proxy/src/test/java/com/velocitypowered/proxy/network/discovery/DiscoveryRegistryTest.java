@@ -39,6 +39,22 @@ class DiscoveryRegistryTest {
   }
 
   @Test
+  void sleepTransitionBlocksAdmissionAndBackendVetoRestoresIt() {
+    var session = registry.register(resume("hub"));
+    registry.heartbeat(session, 0, DiscoveryRegistry.State.READY, 0, Set.of());
+    var slot = registry.reservePhysical("hub-1").orElseThrow();
+    assertFalse(registry.prepareSleep(session));
+    registry.release(slot);
+    assertTrue(registry.prepareSleep(session));
+    assertTrue(registry.reserve("hub", "").isEmpty());
+    assertTrue(registry.reservePhysical("hub-1").isEmpty());
+    registry.heartbeat(session, 1, DiscoveryRegistry.State.READY, 0, Set.of());
+    assertTrue(registry.reservePhysical("hub-1").isEmpty());
+    registry.cancelSleep(session);
+    assertTrue(registry.reservePhysical("hub-1").isPresent());
+  }
+
+  @Test
   void unknownGroupsAndDuplicateIdentitiesAreRejected() {
     assertThrows(IllegalArgumentException.class, () -> registry.register(resume("missing")));
     registry.register(resume("hub"));

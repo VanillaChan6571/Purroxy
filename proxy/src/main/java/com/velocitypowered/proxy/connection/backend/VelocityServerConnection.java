@@ -73,6 +73,17 @@ public class VelocityServerConnection implements MinecraftConnectionAssociation,
   private BackendConnectionPhase connectionPhase = BackendConnectionPhases.UNKNOWN;
   private final Map<Long, Long> pendingPings = new HashMap<>();
   private @MonotonicNonNull Integer entityId;
+  SeamlessConfiguration.Capture configurationCapture = new SeamlessConfiguration.Capture(ProtocolVersion.UNKNOWN);
+
+  /** Records the actual client's known-pack selection for a future native configuration comparison. */
+  public void recordKnownPacks(com.velocitypowered.proxy.protocol.packet.config.KnownPacksPacket packet) {
+    io.netty.channel.EventLoop loop = ensureConnected().eventLoop();
+    if (loop.inEventLoop()) {
+      configurationCapture.select(packet);
+    } else {
+      loop.execute(() -> configurationCapture.select(packet));
+    }
+  }
 
   /**
    * Initializes a new server connection.

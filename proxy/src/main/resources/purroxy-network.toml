@@ -1,4 +1,6 @@
-# Backend discovery is opt-in until certificates and backend identities are provisioned.
+# Enable discovery, then copy purroxy-pairing/purroxy.challenge into each Nekopur server directory.
+# The same challenge enrolls any number of backends and stays valid until an administrator runs
+# /purroxy pairing rotate. Use /purroxy pairing revoke <server> to drop one backend's credential.
 format-version = 1
 fallback = ["hub"]
 
@@ -7,10 +9,12 @@ fallback = ["hub"]
 
 [discovery]
 enabled = false
+authentication = "pairing"
 # Control handshakes share the Minecraft listener (default 25565).
-certificate-file = "purroxy.crt"
-private-key-file = "purroxy.key"
-backend-ca-file = "backends-ca.crt"
+# Advanced legacy mode: authentication = "certificates" and configure these paths.
+# certificate-file = "purroxy.crt"
+# private-key-file = "purroxy.key"
+# backend-ca-file = "backends-ca.crt"
 
 [groups.hub]
 handoff-mode = "off" # Opt in with normal or seamless-preferred; required refuses unqualified continuity.

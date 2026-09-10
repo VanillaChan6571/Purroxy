@@ -179,6 +179,7 @@ public class ClientConfigSessionHandler implements MinecraftSessionHandler {
       VelocityServerConnection targetServer =
           player.getConnectionInFlightOrConnectedServer();
       if (targetServer != null) {
+        targetServer.recordKnownPacks(packet);
         targetServer.ensureConnected().write(packet);
       }
     }).exceptionally(ex -> {

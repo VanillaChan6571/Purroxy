@@ -20,6 +20,7 @@ package com.velocitypowered.proxy.network.discovery;
 /** Explicit backend contract; discovery alone never implies transfer compatibility. */
 public record HandoffCapabilities(int version, String profile, String worldIdentity,
                                   String mapRevision, boolean seamless) {
+  /** Validates the supported profile and explicit replica identity. */
   public HandoffCapabilities {
     if (version != 1 || !"hub-position".equals(profile) || worldIdentity == null
         || !worldIdentity.matches("[a-z0-9][a-z0-9_-]{0,63}") || mapRevision == null

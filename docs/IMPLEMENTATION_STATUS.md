@@ -5,6 +5,10 @@ seamless transfers. Older-client translation support is deferred by user request
 
 ## Implemented foundations
 
+For the newer coordinated hub-position implementation, recovery behavior, opt-in
+configuration and remaining seamless work, see [HANDOFF_IMPLEMENTATION.md](HANDOFF_IMPLEMENTATION.md).
+The discovery verification history below predates that integration.
+
 - `BackendResume`: immutable endpoint, identity, group, map, region and capacity metadata.
 - `CapacityPolicy`: safe-capacity preference, overflow to actual hard capacity,
   regional selection, rotating ties and strict 70% wake decision.
@@ -34,9 +38,10 @@ seamless transfers. Older-client translation support is deferred by user request
 - DRAINING backends receive evacuation attempts through the same fallback resolver;
   empty retired sessions receive a `retired` acknowledgment before control closes.
 
-Discovery is disabled by default. The service is partially integrated, not production
-ready: group retries, full drain failure handling and the backend
-adapter remain unfinished. See `DISCOVERY_PROTOCOL.md` for the implemented wire format.
+Discovery is disabled by default. Group retries, full drain failure handling and
+live integration qualification remain unfinished. The native Nekopur adapter now
+exists in its own project. See `DISCOVERY_PROTOCOL.md` for discovery and
+`HANDOFF_IMPLEMENTATION.md` for the coordinated transfer integration.
 
 ## Verification
 
@@ -64,7 +69,7 @@ standalone test dependencies/output are under ignored `.gradle/tmp`.
 2. Complete bounded group retries, superseded-request cancellation, and robust
    evacuation failure handling. Verify all connection paths
    against a live backend, including control disconnect during login/configuration.
-3. Implement Nekopurr adapter in its own module change: standalone `Nekopurr.yaml`,
-   actual hard capacity from server.properties, maps, live sleep/control and wake.
-4. Coordinated data handoff and native 26.2 seamless path, then live integration
-   testing. No client continuity or backend behavior has been verified yet.
+3. Exercise the existing Nekopur adapter and coordinated handoff with live players:
+   source/destination restart, control interruption and repeated hub transfers.
+4. Implement the native 26.2 seamless path and qualify its compatibility matrix.
+   No client continuity has been verified yet.

@@ -65,15 +65,34 @@ public class ServerChannelInitializer extends ChannelInitializer<Channel> {
     }
     com.velocitypowered.proxy.network.discovery.DiscoveryService discovery = server.getDiscovery();
     if (discovery != null) {
+      // The Minecraft pipeline is built up front even though control connections share this
+      // listener: plugins that wrap this initializer inject relative to the Minecraft handlers
+      // as soon as it returns (ViaVersion adds before minecraft-encoder), so deferring them
+      // fails every player connection. A control connection discards them below instead.
       ch.pipeline().addLast("purroxy-discriminator",
           new com.velocitypowered.proxy.network.discovery.DiscoveryHandshakeDecoder(
-              discovery::initialize, channel -> {
-                initializeMinecraft(channel);
-                channel.pipeline().fireChannelActive();
+              channel -> {
+                discardMinecraftPipeline(channel);
+                discovery.initialize(channel);
+              }, channel -> {
               }));
-    } else {
-      initializeMinecraft(ch);
     }
+    initializeMinecraft(ch);
+  }
+
+  /**
+   * Strips the Minecraft pipeline, and any plugin handlers injected around it, once a connection
+   * turns out to speak the discovery control protocol rather than Minecraft.
+   */
+  static void discardMinecraftPipeline(final Channel ch) {
+    ch.pipeline().toMap().forEach((name, handler) -> {
+      if (!READ_TIMEOUT.equals(name)
+          && !(handler instanceof HAProxyMessageDecoder)
+          && !(handler instanceof com.velocitypowered.proxy.network.discovery.DiscoveryHandshakeDecoder)
+          && ch.pipeline().context(handler) != null) {
+        ch.pipeline().remove(handler);
+      }
+    });
   }
 
   private void initializeMinecraft(final Channel ch) {

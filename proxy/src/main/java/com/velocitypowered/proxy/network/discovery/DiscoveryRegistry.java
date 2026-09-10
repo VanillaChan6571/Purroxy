@@ -75,6 +75,7 @@ public final class DiscoveryRegistry {
     private long renewed;
     private long sequence = -1;
     private State state = State.REGISTERING;
+    private boolean sleepPending;
     private int players;
     private int connectedPlayers;
 
@@ -123,6 +124,9 @@ public final class DiscoveryRegistry {
     entry.reservations.removeAll(admitted);
     entry.sequence = sequence;
     entry.state = state;
+    if (state == State.SLEEPING) {
+      entry.sleepPending = false;
+    }
     entry.renewed = clock.getAsLong();
     return true;
   }
@@ -148,7 +152,7 @@ public final class DiscoveryRegistry {
         .filter(e -> !excluded.contains(e.resume.serverId()))
         .sorted(java.util.Comparator.comparing(e -> e.resume.serverId()))
         .map(e -> new CapacityPolicy.Candidate(e.resume, Math.max(e.players, e.connectedPlayers), e.reservations.size(),
-            live(e) && e.state == State.READY)).toList();
+            live(e) && e.state == State.READY && !e.sleepPending)).toList();
     return CapacityPolicy.select(candidates, preferredRegion, rotation++).map(selected -> {
       Entry entry = entries.get(selected.resume().serverId());
       UUID token = UUID.randomUUID();
@@ -160,7 +164,7 @@ public final class DiscoveryRegistry {
   /** Reserves an explicit physical target, bypassing only the soft balancing target. */
   public synchronized Optional<Reservation> reservePhysical(String name) {
     Entry entry = entries.get(name.toLowerCase(Locale.ROOT));
-    if (entry == null || !live(entry) || entry.state != State.READY
+    if (entry == null || !live(entry) || entry.state != State.READY || entry.sleepPending
         || (long) Math.max(entry.players, entry.connectedPlayers) + entry.reservations.size()
             >= entry.resume.hardLimit()) {
       return Optional.empty();
@@ -184,7 +188,7 @@ public final class DiscoveryRegistry {
   /** Rechecks a held slot before starting the final admission. */
   public synchronized boolean canCommit(Reservation reservation) {
     Entry entry = entry(reservation.session());
-    return entry != null && live(entry) && entry.state == State.READY
+    return entry != null && live(entry) && entry.state == State.READY && !entry.sleepPending
         && entry.reservations.contains(reservation.token())
         // The backend may already count this joining player. Do not count its held slot twice.
         // Reservations enforce capacity before connect; backend admission remains authoritative.
@@ -213,9 +217,30 @@ public final class DiscoveryRegistry {
     return true;
   }
 
+  /** Lists backend state with pending sleep transitions excluded from routing. */
   public synchronized List<Snapshot> snapshots() {
-    return entries.values().stream().map(e -> new Snapshot(e.resume, e.session, e.state,
+    return entries.values().stream().map(e -> new Snapshot(e.resume, e.session,
+        e.sleepPending && e.state == State.READY ? State.REGISTERING : e.state,
         e.players, e.reservations.size(), live(e))).toList();
+  }
+
+  /** Removes an empty backend from routing atomically before requesting its sleep transition. */
+  public synchronized boolean prepareSleep(Session session) {
+    Entry entry = entry(session);
+    if (entry == null || !live(entry) || entry.state != State.READY || entry.sleepPending
+        || entry.players != 0 || entry.connectedPlayers != 0 || !entry.reservations.isEmpty()) {
+      return false;
+    }
+    entry.sleepPending = true;
+    return true;
+  }
+
+  /** A backend veto confirms it remained awake and may safely receive admissions again. */
+  public synchronized void cancelSleep(Session session) {
+    Entry entry = entry(session);
+    if (entry != null) {
+      entry.sleepPending = false;
+    }
   }
 
   private boolean live(Entry entry) {

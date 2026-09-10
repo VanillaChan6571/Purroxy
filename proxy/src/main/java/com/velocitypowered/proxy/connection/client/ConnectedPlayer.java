@@ -1509,8 +1509,15 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
             admission = discovery.begin(getUniqueId(), realDestination)
                 .orElse(null);
             if (admission == null) {
+              // Only a privileged player may start a sleeping spare by naming it; capacity policy
+              // decides for everyone else, so ordinary players cannot wake backends at will.
+              boolean starting = hasPermission("purroxy.admin.wake")
+                  && discovery.wakeOnDemand(realDestination.getServerInfo().getName());
               return completedFuture(com.velocitypowered.proxy.connection.util.ConnectionRequestResults.forDisconnect(
-                  Component.text("This server is not ready or has reached its player limit."),
+                  Component.text(starting
+                      ? realDestination.getServerInfo().getName()
+                          + " is starting up. Try again in a few seconds."
+                      : "This server is not ready or has reached its player limit."),
                   realDestination));
             }
           } else {
@@ -1521,10 +1528,27 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
           VelocityServerConnection con =
               new VelocityServerConnection(vrs, previousServer, ConnectedPlayer.this, server);
           connectionInFlight = con;
+          final VelocityServerConnection handoffSource = getConnectedServer();
+          final java.util.concurrent.atomic.AtomicReference<com.velocitypowered.proxy.network.discovery.HandoffCoordinator.Ticket>
+              handoffTicket = new java.util.concurrent.atomic.AtomicReference<>();
 
           CompletableFuture<Impl> attempt;
           try {
-            attempt = con.connect();
+            CompletableFuture<com.velocitypowered.proxy.network.discovery.HandoffCoordinator.Ticket> prepared = discovery == null
+                ? CompletableFuture.completedFuture(null)
+                : discovery.prepareHandoff(ConnectedPlayer.this,
+                    handoffSource == null ? null : handoffSource.getServerInfo().getName(),
+                    realDestination.getServerInfo().getName(),
+                    () -> isActive() && connectionInFlight == con && getConnectedServer() == handoffSource
+                        && discovery.canComplete(getUniqueId(), realDestination.getServerInfo().getName()), connection.eventLoop());
+            attempt = prepared.thenComposeAsync(ticket -> {
+              handoffTicket.set(ticket);
+              if (!isActive() || connectionInFlight != con || getConnectedServer() != handoffSource
+                  || discovery != null && !discovery.canComplete(getUniqueId(), realDestination.getServerInfo().getName())) {
+                return CompletableFuture.failedFuture(new IllegalStateException("Connection changed while preparing the handoff"));
+              }
+              return con.connect();
+            }, connection.eventLoop());
           } catch (RuntimeException failure) {
             if (discovery != null && admission != null) {
               discovery.finish(admission);
@@ -1534,9 +1558,14 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
           }
           return attempt.whenCompleteAsync((result, exception) -> {
             if (discovery != null && admission != null) {
+              discovery.finishHandoff(handoffTicket.get(), result != null && result.isSuccessful());
               discovery.finish(admission);
+              if ((exception != null || result == null || !result.isSuccessful())
+                  && discovery.needsHandoffRecovery(getUniqueId()) && getConnectedServer() == handoffSource) {
+                disconnect(Component.text("Your transfer needs recovery. Reconnect to resume at its recorded owner."));
+              }
             }
-            if (result != null && !result.isSuccessful() && !result.isSafe()) {
+            if (isActive() && result != null && !result.isSuccessful() && !result.isSafe()) {
               handleConnectionException(result.getAttemptedConnection(),
                   // The only way for the reason to be null is if the result is safe
                   DisconnectPacket.create(result.getReasonComponent().orElseThrow(),

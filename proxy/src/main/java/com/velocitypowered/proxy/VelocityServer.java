@@ -289,6 +289,10 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
         com.velocitypowered.proxy.command.builtin.RegionCommand.create(this);
     commandManager.register(commandManager.metaBuilder(regionCommand)
         .plugin(VelocityVirtualPlugin.INSTANCE).build(), regionCommand);
+    final BrigadierCommand purroxyCommand =
+        com.velocitypowered.proxy.command.builtin.PurroxyCommand.create(this);
+    commandManager.register(commandManager.metaBuilder(purroxyCommand)
+        .plugin(VelocityVirtualPlugin.INSTANCE).build(), purroxyCommand);
     commandManager.register(
         commandManager.metaBuilder(shutdownCommand)
             .plugin(VelocityVirtualPlugin.INSTANCE)
@@ -665,7 +669,22 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
     };
 
     if (explicitExit) {
-      Thread thread = new Thread(shutdownProcess);
+      // A failing step must never strand the process: shutdownInProgress is already set, so a
+      // second /end returns immediately and the proxy would keep its listeners bound forever.
+      Thread thread = new Thread(() -> {
+        try {
+          shutdownProcess.run();
+        } catch (Throwable failure) {
+          try {
+            logger.error("Shutdown did not complete cleanly; exiting anyway.", failure);
+          } catch (Throwable loggingFailed) {
+            failure.printStackTrace(); // Logging is already torn down this late in shutdown.
+          }
+        } finally {
+          shutdown = true;
+          System.exit(0);
+        }
+      });
       thread.start();
     } else {
       shutdownProcess.run();

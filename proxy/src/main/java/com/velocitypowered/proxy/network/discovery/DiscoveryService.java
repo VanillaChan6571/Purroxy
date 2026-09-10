@@ -61,14 +61,23 @@ public final class DiscoveryService implements AutoCloseable {
   private final @Nullable HandoffCoordinator handoff;
   private final Map<DiscoveryRegistry.Session, HandoffCapabilities> handoffCapabilities = new HashMap<>();
   private final Map<UUID, HandoffRpc> handoffRequests = new HashMap<>();
+  private final Map<DiscoveryRegistry.Session, Long> nextHandoffSend = new HashMap<>();
+  private long nextReleaseRetry;
+  private final Map<DiscoveryRegistry.Session, Long> idleSince = new HashMap<>();
+  private final Map<DiscoveryRegistry.Session, SleepRequest> sleepRequests = new HashMap<>();
+  private final Set<DiscoveryRegistry.Session> managedSleep = new java.util.HashSet<>();
+
+  private record SleepRequest(UUID request, long started) {}
 
   private record HandoffRpc(DiscoveryRegistry.Session session, CompletableFuture<JsonObject> result) {}
+
   private final Map<DiscoveryRegistry.Session, Channel> channels = new HashMap<>();
   private final Map<DiscoveryRegistry.Session, RegisteredServer> published = new HashMap<>();
   private final Map<String, Long> lastUnknownGroupAlert = new HashMap<>();
   private final Map<UUID, Admission> admissions = new HashMap<>();
   private final Map<DiscoveryRegistry.Session, Long> waking = new HashMap<>();
   private final Map<DiscoveryRegistry.Session, Long> wakeRetryAfter = new HashMap<>();
+  private final Map<DiscoveryRegistry.Session, Long> notReadySince = new HashMap<>();
   private final Map<String, Long> capacityAlerts = new HashMap<>();
   private final Map<String, Long> demand = new HashMap<>();
   private final Map<String, String> demandRegions = new HashMap<>();
@@ -113,6 +122,64 @@ public final class DiscoveryService implements AutoCloseable {
       throw new java.io.UncheckedIOException("Unable to load durable handoff decisions", failure);
     }
     timer.scheduleWithFixedDelay(this::maintenance, 1, 1, TimeUnit.SECONDS);
+    if (configuration.pairing() != null) {
+      logger.info("Backend pairing is enabled. Copy purroxy-pairing/{} into each Nekopur server directory; "
+          + "it stays valid until /purroxy pairing rotate revokes it.", PairingStore.CHALLENGE_FILE);
+    }
+  }
+
+  /** Point-in-time view of one backend, for administrative display only. */
+  public record BackendStatus(String name, String group, String region, String state, boolean leaseValid,
+                              int players, int reservations, int safeLimit, int hardLimit,
+                              long wakeAgeSeconds, boolean managedSleep, boolean sleepPending) {
+  }
+
+  /** Snapshots every known backend so administrators can see why one is not accepting players. */
+  public synchronized java.util.List<BackendStatus> status() {
+    long now = System.nanoTime();
+    return registry.snapshots().stream()
+        .map(snapshot -> new BackendStatus(snapshot.resume().serverId(), snapshot.resume().group(),
+            snapshot.resume().region(), snapshot.state().name(), snapshot.leaseValid(),
+            snapshot.players(), snapshot.reservations(), snapshot.resume().safeLimit(),
+            snapshot.resume().hardLimit(),
+            waking.containsKey(snapshot.session())
+                ? TimeUnit.NANOSECONDS.toSeconds(now - waking.get(snapshot.session())) : -1L,
+            managedSleep.contains(snapshot.session()), sleepRequests.containsKey(snapshot.session())))
+        .sorted(java.util.Comparator.comparing(BackendStatus::group).thenComparing(BackendStatus::name))
+        .toList();
+  }
+
+  /** Reports whether backends enroll with the shared challenge rather than pinned certificates. */
+  public boolean pairingEnabled() {
+    return configuration.pairing() != null;
+  }
+
+  /** Lists the backends that have completed challenge enrollment. */
+  public Set<String> enrolledBackends() {
+    return configuration.pairing() == null ? Set.of() : configuration.pairing().names();
+  }
+
+  /** Invalidates the shared challenge and publishes a replacement, leaving enrolled backends connected. */
+  public void rotateChallenge() throws java.io.IOException {
+    if (configuration.pairing() != null) {
+      configuration.pairing().rotateChallenge();
+    }
+  }
+
+  /** Revokes one backend's credential and drops its control connection so it cannot resume. */
+  public synchronized boolean revokeBackend(String name) throws java.io.IOException {
+    if (configuration.pairing() == null || !configuration.pairing().revoke(name)) {
+      return false;
+    }
+    registry.snapshots().stream().filter(snapshot -> snapshot.resume().serverId().equals(name))
+        .map(DiscoveryRegistry.Snapshot::session).toList().forEach(session -> {
+          Channel channel = channels.get(session);
+          disconnect(session); // Maintenance retires the published server once the lease lapses.
+          if (channel != null) {
+            channel.close();
+          }
+        });
+    return true;
   }
 
   private synchronized Optional<HandoffCoordinator.Peer> handoffPeer(String name) {
@@ -131,6 +198,12 @@ public final class DiscoveryService implements AutoCloseable {
     if (handoffRequests.size() >= 256) {
       return CompletableFuture.failedFuture(new IllegalStateException("Too many handoff control requests"));
     }
+    long now = System.nanoTime();
+    long sendAt = Math.max(now, nextHandoffSend.getOrDefault(session, now));
+    if (sendAt - now > TimeUnit.SECONDS.toNanos(2)) {
+      return CompletableFuture.failedFuture(new IllegalStateException("Backend handoff queue is full"));
+    }
+    nextHandoffSend.put(session, sendAt + TimeUnit.MILLISECONDS.toNanos(100));
     UUID request = UUID.randomUUID();
     CompletableFuture<JsonObject> response = new CompletableFuture<>();
     handoffRequests.put(request, new HandoffRpc(session, response));
@@ -138,18 +211,28 @@ public final class DiscoveryService implements AutoCloseable {
     framed.addProperty("type", "handoff");
     framed.addProperty("session", peer.session().toString());
     framed.addProperty("request", request.toString());
-    channel.writeAndFlush(gson.toJson(framed) + "\n").addListener(result -> {
-      if (!result.isSuccess()) response.completeExceptionally(result.cause());
-    });
+    channel.eventLoop().schedule(() -> {
+      if (!response.isDone()) {
+        channel.writeAndFlush(gson.toJson(framed) + "\n").addListener(result -> {
+          if (!result.isSuccess()) {
+            response.completeExceptionally(result.cause());
+          }
+        });
+      }
+    }, sendAt - now, TimeUnit.NANOSECONDS);
     return response.orTimeout(5, TimeUnit.SECONDS).whenComplete((result, failure) -> {
-      synchronized (DiscoveryService.this) { handoffRequests.remove(request); }
+      synchronized (DiscoveryService.this) {
+        handoffRequests.remove(request);
+      }
     });
   }
 
   /** Prepares a coordinated transfer after connection events have selected the final destination. */
-  public CompletableFuture<@Nullable HandoffCoordinator.Ticket> prepareHandoff(Player player, @Nullable String source,
+  public CompletableFuture<HandoffCoordinator.@Nullable Ticket> prepareHandoff(Player player, @Nullable String source,
       String destination, java.util.function.BooleanSupplier valid, java.util.concurrent.Executor playerLoop) {
-    if (handoff == null) return CompletableFuture.completedFuture(null);
+    if (handoff == null) {
+      return CompletableFuture.completedFuture(null);
+    }
     String group;
     synchronized (this) {
       group = registry.snapshots().stream().filter(snapshot -> snapshot.resume().serverId().equals(destination))
@@ -160,7 +243,7 @@ public final class DiscoveryService implements AutoCloseable {
   }
 
   /** Finalizes source release only after Velocity reports a successful destination connection. */
-  public void finishHandoff(@Nullable HandoffCoordinator.Ticket ticket, boolean connected) {
+  public void finishHandoff(HandoffCoordinator.@Nullable Ticket ticket, boolean connected) {
     if (handoff != null && ticket != null) {
       handoff.finish(ticket, connected).exceptionally(failure -> {
         logger.error("Handoff {} remains recoverable; source release failed", ticket.transfer(), failure);
@@ -171,6 +254,10 @@ public final class DiscoveryService implements AutoCloseable {
 
   public boolean hasCommittedHandoff(UUID player) {
     return handoff != null && handoff.recoveryOwner(player).isPresent();
+  }
+
+  public boolean needsHandoffRecovery(UUID player) {
+    return handoff != null && handoff.requiresRecovery(player);
   }
 
   /** Installs the TLS control path after the unencrypted protocol discriminator. */
@@ -223,9 +310,13 @@ public final class DiscoveryService implements AutoCloseable {
     observeConnections();
     if (handoff != null && handoff.recoveryOwner(player.getUniqueId()).isPresent()) {
       String owner = handoff.recoveryOwner(player.getUniqueId()).orElseThrow();
-      if (excluded.contains(owner)) return Optional.empty();
+      if (excluded.contains(owner)) {
+        return Optional.empty();
+      }
       RegisteredServer target = server.getServer(owner).orElse(null);
-      if (target == null) return Optional.empty();
+      if (target == null) {
+        return Optional.empty();
+      }
       Optional<Admission> admission = begin(player.getUniqueId(), target);
       return admission.isPresent() ? Optional.of(target) : Optional.empty();
     }
@@ -266,7 +357,7 @@ public final class DiscoveryService implements AutoCloseable {
   /** Begins a physical connection, atomically acquiring or consuming its planned group slot. */
   public synchronized Optional<Admission> begin(UUID player, RegisteredServer destination) {
     String name = destination.getServerInfo().getName();
-    if (configuration.identities().containsKey(name.toLowerCase(java.util.Locale.ROOT))
+    if (configuration.identity(name.toLowerCase(java.util.Locale.ROOT)) != null
         && published.values().stream().noneMatch(value -> value == destination)) {
       return Optional.empty();
     }
@@ -279,7 +370,7 @@ public final class DiscoveryService implements AutoCloseable {
       }
       finish(planned); // A plugin redirected the planned connection.
     }
-    boolean managed = configuration.identities().containsKey(name.toLowerCase(java.util.Locale.ROOT));
+    boolean managed = configuration.identity(name.toLowerCase(java.util.Locale.ROOT)) != null;
     DiscoveryRegistry.Reservation slot = null;
     if (managed) {
       slot = registry.reservePhysical(name).orElse(null);
@@ -290,6 +381,29 @@ public final class DiscoveryService implements AutoCloseable {
     Admission admission = new Admission(UUID.randomUUID(), player, name, slot, System.nanoTime());
     admissions.put(player, admission);
     return Optional.of(admission);
+  }
+
+  /**
+   * Wakes a sleeping backend that a privileged player asked for by name. Ordinary admission never
+   * reaches this: capacity policy decides when a spare is needed, and this is the deliberate override.
+   * Reports whether the backend is now starting, so the caller can say so instead of blaming capacity.
+   */
+  public synchronized boolean wakeOnDemand(String name) {
+    var target = registry.snapshots().stream()
+        .filter(snapshot -> snapshot.resume().serverId().equalsIgnoreCase(name))
+        .filter(DiscoveryRegistry.Snapshot::leaseValid).findFirst().orElse(null);
+    if (target == null || target.state() == DiscoveryRegistry.State.READY) {
+      return false;
+    }
+    if (waking.containsKey(target.session())) {
+      return true; // Already starting; repeated requests must not queue more wakes.
+    }
+    if (target.state() != DiscoveryRegistry.State.SLEEPING
+        || System.nanoTime() < wakeRetryAfter.getOrDefault(target.session(), Long.MIN_VALUE)) {
+      return target.state() != DiscoveryRegistry.State.DRAINING;
+    }
+    sendWake(target.session(), target.resume().group());
+    return true;
   }
 
   /** Releases exactly this attempt after the backend connection future completes. */
@@ -367,7 +481,7 @@ public final class DiscoveryService implements AutoCloseable {
 
   synchronized DiscoveryRegistry.Session register(BackendResume resume,
                                                             String fingerprint, Channel channel) {
-    DiscoveryConfiguration.Identity identity = configuration.identities().get(resume.serverId());
+    DiscoveryConfiguration.Identity identity = configuration.identity(resume.serverId());
     if (identity == null || !identity.fingerprint().equalsIgnoreCase(fingerprint)
         || !identity.host().equalsIgnoreCase(resume.host()) || identity.port() != resume.port()) {
       throw new IllegalArgumentException("Backend identity, endpoint or group is not authorized");
@@ -440,6 +554,10 @@ public final class DiscoveryService implements AutoCloseable {
     registry.disconnected(session);
     channels.remove(session);
     handoffCapabilities.remove(session);
+    managedSleep.remove(session);
+    sleepRequests.remove(session);
+    idleSince.remove(session);
+    nextHandoffSend.remove(session);
     java.util.List.copyOf(handoffRequests.values()).stream().filter(request -> request.session().equals(session))
         .forEach(request -> request.result().completeExceptionally(new IllegalStateException("Handoff control disconnected")));
   }
@@ -448,6 +566,12 @@ public final class DiscoveryService implements AutoCloseable {
     try {
       observeConnections();
       wakeSpares();
+      nudgeStuckBackends();
+      sleepIdleSpares();
+      if (handoff != null && System.nanoTime() >= nextReleaseRetry) {
+        nextReleaseRetry = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        handoff.retryReleases();
+      }
       for (Admission admission : java.util.List.copyOf(admissions.values())) {
         if (System.nanoTime() - admission.created() >= TimeUnit.SECONDS.toNanos(30)) {
           finish(admission);
@@ -522,7 +646,9 @@ public final class DiscoveryService implements AutoCloseable {
       var candidates = members.stream().map(s -> new CapacityPolicy.Candidate(s.resume(),
           Math.max(s.players(), published.get(s.session()).getPlayersConnected().size()), s.reservations(),
           s.leaseValid() && s.state() == DiscoveryRegistry.State.READY)).toList();
-      boolean emptyDemand = demand.containsKey(group) && candidates.stream().noneMatch(CapacityPolicy.Candidate::ready);
+      boolean emptyDemand = (demand.containsKey(group) || members.stream().anyMatch(s ->
+          managedSleep.contains(s.session()) && s.leaseValid() && s.state() == DiscoveryRegistry.State.SLEEPING))
+          && candidates.stream().noneMatch(CapacityPolicy.Candidate::ready);
       boolean highLoad = CapacityPolicy.shouldWake(candidates, false);
       if (!highLoad && !emptyDemand && candidates.stream().anyMatch(CapacityPolicy.Candidate::ready)
           && capacityAlerts.remove(group) != null) {
@@ -549,26 +675,113 @@ public final class DiscoveryService implements AutoCloseable {
         capacityAlert(group, "No sleeping spare is available; connections will use overflow capacity.");
         continue;
       }
-      var session = spare.get().session();
-      Channel channel = channels.get(session);
-      if (channel == null || !channel.isActive()) {
+      sendWake(spare.get().session(), group);
+    }
+  }
+
+  private void sendWake(DiscoveryRegistry.Session session, String group) {
+    Channel channel = channels.get(session);
+    if (channel == null || !channel.isActive()) {
+      return;
+    }
+    waking.put(session, System.nanoTime());
+    JsonObject wake = new JsonObject();
+    wake.addProperty("type", "wake");
+    wake.addProperty("session", session.token().toString());
+    wake.addProperty("request", UUID.randomUUID().toString());
+    channel.writeAndFlush(gson.toJson(wake) + "\n").addListener(result -> {
+      if (!result.isSuccess()) {
+        synchronized (DiscoveryService.this) {
+          waking.remove(session);
+          wakeRetryAfter.put(session, System.nanoTime() + TimeUnit.SECONDS.toNanos(30));
+          capacityAlert(group, "A wake request could not be delivered.");
+        }
+      }
+    });
+    logger.info("Requested wake for backend {} in group {}", session.serverId(), group);
+  }
+
+  /**
+   * Re-wakes a leased backend that has been stuck short of READY. A preparation that never finishes
+   * would otherwise strand it: the backend clears its own sleep request on the first wake, so only a
+   * further wake can restart preparation. Sleeping and draining backends are left alone.
+   */
+  private void nudgeStuckBackends() {
+    long now = System.nanoTime();
+    Set<DiscoveryRegistry.Session> stalled = new java.util.HashSet<>();
+    for (var snapshot : registry.snapshots()) {
+      DiscoveryRegistry.State state = snapshot.state();
+      if (!snapshot.leaseValid() || (state != DiscoveryRegistry.State.REGISTERING
+          && state != DiscoveryRegistry.State.WAKING)) {
         continue;
       }
-      waking.put(session, now);
-      JsonObject wake = new JsonObject();
-      wake.addProperty("type", "wake");
-      wake.addProperty("session", session.token().toString());
-      wake.addProperty("request", UUID.randomUUID().toString());
-      channel.writeAndFlush(gson.toJson(wake) + "\n").addListener(result -> {
+      DiscoveryRegistry.Session session = snapshot.session();
+      stalled.add(session);
+      Long since = notReadySince.putIfAbsent(session, now);
+      if (since == null || now - since < TimeUnit.SECONDS.toNanos(60) || waking.containsKey(session)
+          || now < wakeRetryAfter.getOrDefault(session, Long.MIN_VALUE)) {
+        continue;
+      }
+      notReadySince.put(session, now);
+      logger.warn("Backend {} has been {} for over a minute; requesting another wake.",
+          snapshot.resume().serverId(), state);
+      sendWake(session, snapshot.resume().group());
+    }
+    notReadySince.keySet().retainAll(stalled);
+  }
+
+  private void sleepIdleSpares() {
+    long now = System.nanoTime();
+    for (var pending : java.util.List.copyOf(sleepRequests.entrySet())) {
+      if (now - pending.getValue().started() >= TimeUnit.SECONDS.toNanos(20)) {
+        Channel channel = channels.get(pending.getKey());
+        if (channel != null) {
+          channel.close(); // Ambiguous sleep outcome must reauthenticate before routing resumes.
+        }
+        sleepRequests.remove(pending.getKey());
+      }
+    }
+    var snapshots = registry.snapshots();
+    for (var member : snapshots) {
+      RegisteredServer physical = published.get(member.session());
+      if (!managedSleep.contains(member.session()) || !member.leaseValid()
+          || member.state() != DiscoveryRegistry.State.READY || member.players() != 0
+          || member.reservations() != 0 || physical == null || !physical.getPlayersConnected().isEmpty()) {
+        idleSince.remove(member.session());
+        continue;
+      }
+      long idle = idleSince.computeIfAbsent(member.session(), ignored -> now);
+      if (now - idle < TimeUnit.MINUTES.toNanos(5) || demand.containsKey(member.resume().group())
+          || !sleepRequests.isEmpty()) {
+        continue;
+      }
+      boolean spare = snapshots.stream().anyMatch(other -> !other.session().equals(member.session())
+          && other.resume().group().equals(member.resume().group())
+          && other.resume().region().equals(member.resume().region()) && other.leaseValid()
+          && other.state() == DiscoveryRegistry.State.READY
+          && 2L * (Math.max(other.players(), published.get(other.session()).getPlayersConnected().size())
+              + other.reservations()) <= other.resume().safeLimit());
+      if (!spare || !registry.prepareSleep(member.session())) {
+        continue;
+      }
+      Channel channel = channels.get(member.session());
+      if (channel == null || !channel.isActive()) {
+        registry.disconnected(member.session());
+        continue;
+      }
+      UUID request = UUID.randomUUID();
+      sleepRequests.put(member.session(), new SleepRequest(request, now));
+      JsonObject sleep = new JsonObject();
+      sleep.addProperty("type", "sleep");
+      sleep.addProperty("session", member.session().token().toString());
+      sleep.addProperty("request", request.toString());
+      channel.writeAndFlush(gson.toJson(sleep) + "\n").addListener(result -> {
         if (!result.isSuccess()) {
-          synchronized (DiscoveryService.this) {
-            waking.remove(session);
-            wakeRetryAfter.put(session, System.nanoTime() + TimeUnit.SECONDS.toNanos(30));
-            capacityAlert(group, "A wake request could not be delivered.");
-          }
+          channel.close();
         }
       });
-      logger.info("Requested wake for backend {} in group {}", session.serverId(), group);
+      logger.info("Requested sleep for idle spare {}", member.resume().serverId());
+      break;
     }
   }
 
@@ -595,7 +808,9 @@ public final class DiscoveryService implements AutoCloseable {
   public synchronized void close() {
     timer.shutdownNow();
     regionPreferences.close();
-    if (handoff != null) handoff.close();
+    if (handoff != null) {
+      handoff.close();
+    }
     channels.values().forEach(Channel::close);
     channels.clear();
     for (Admission admission : java.util.List.copyOf(admissions.values())) {
@@ -626,24 +841,55 @@ public final class DiscoveryService implements AutoCloseable {
         if (!type.equals("resume") || message.get("version").getAsInt() != 1) {
           throw new IllegalArgumentException("Expected resume protocol version 1");
         }
-        SslHandler ssl = context.pipeline().get(SslHandler.class);
-        String fingerprint = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-            .digest(ssl.engine().getSession().getPeerCertificates()[0].getEncoded()));
-        session = register(gson.fromJson(message.get("resume"), BackendResume.class),
-            fingerprint, context.channel());
+        PairingStore.Registration paired = null;
+        BackendResume resume;
+        String fingerprint;
+        if (configuration.pairing() != null) {
+          Set<String> occupied = server.getAllServers().stream().map(physical -> physical.getServerInfo().getName())
+              .collect(java.util.stream.Collectors.toSet());
+          paired = configuration.pairing().authenticate(message,
+              ((InetSocketAddress) context.channel().remoteAddress()).getAddress().getHostAddress(),
+              configuration.groups(), occupied);
+          resume = paired.resume();
+          fingerprint = PairingStore.hash(paired.credential());
+        } else {
+          SslHandler ssl = context.pipeline().get(SslHandler.class);
+          fingerprint = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+              .digest(ssl.engine().getSession().getPeerCertificates()[0].getEncoded()));
+          resume = gson.fromJson(message.get("resume"), BackendResume.class);
+        }
+        session = register(resume, fingerprint, context.channel());
         if (message.has("handoff")) {
           HandoffCapabilities capabilities = gson.fromJson(message.get("handoff"), HandoffCapabilities.class);
-          synchronized (DiscoveryService.this) { handoffCapabilities.put(session, capabilities); }
+          synchronized (DiscoveryService.this) {
+            handoffCapabilities.put(session, capabilities);
+          }
         }
         JsonObject response = new JsonObject();
         response.addProperty("type", "registered");
         response.addProperty("session", session.token().toString());
         response.addProperty("heartbeatSeconds", 5);
         response.addProperty("leaseSeconds", 20);
+        if (paired != null) {
+          response.addProperty("serverId", paired.resume().serverId());
+          response.addProperty("credential", paired.credential());
+          response.addProperty("sleepManaged", true);
+          synchronized (DiscoveryService.this) {
+            managedSleep.add(session);
+          }
+        }
         context.writeAndFlush(gson.toJson(response) + "\n");
       } else if (type.equals("heartbeat")) {
         if (!session.token().toString().equals(message.get("session").getAsString())) {
           throw new IllegalArgumentException("Session mismatch");
+        }
+        if (configuration.pairing() != null) {
+          configuration.pairing().confirm(session.serverId());
+        }
+        if (message.get("state").getAsString().equals("SLEEPING")) {
+          synchronized (DiscoveryService.this) {
+            sleepRequests.remove(session);
+          }
         }
         if (message.get("state").getAsString().equals("READY") && !reachable) {
           message.addProperty("state", "REGISTERING");
@@ -666,14 +912,31 @@ public final class DiscoveryService implements AutoCloseable {
           reachable = false;
         }
         heartbeat(session, message);
+      } else if (type.equals("sleep-result")) {
+        if (!session.token().toString().equals(message.get("session").getAsString())) {
+          throw new IllegalArgumentException("Session mismatch");
+        }
+        synchronized (DiscoveryService.this) {
+          SleepRequest pending = sleepRequests.get(session);
+          if (pending != null && pending.request().toString().equals(message.get("request").getAsString())
+              && !message.get("accepted").getAsBoolean()) {
+            sleepRequests.remove(session);
+            idleSince.remove(session);
+            registry.cancelSleep(session);
+          }
+        }
       } else if (type.equals("handoff-result")) {
         if (!session.token().toString().equals(message.get("session").getAsString())) {
           throw new IllegalArgumentException("Handoff session mismatch");
         }
         UUID requestId = UUID.fromString(message.get("request").getAsString());
         HandoffRpc request;
-        synchronized (DiscoveryService.this) { request = handoffRequests.get(requestId); }
-        if (request != null && request.session().equals(session)) request.result().complete(message.deepCopy());
+        synchronized (DiscoveryService.this) {
+          request = handoffRequests.get(requestId);
+        }
+        if (request != null && request.session().equals(session)) {
+          request.result().complete(message.deepCopy());
+        }
       } else {
         throw new IllegalArgumentException("Unknown control message");
       }
@@ -688,6 +951,21 @@ public final class DiscoveryService implements AutoCloseable {
 
     @Override
     public void exceptionCaught(ChannelHandlerContext context, Throwable failure) {
+      if (configuration.pairing() != null && failure.getMessage() != null && failure.getMessage().startsWith("UNKNOWN_GROUP:")) {
+        synchronized (DiscoveryService.this) {
+          long now = System.nanoTime();
+          String warning = failure.getMessage();
+          Long last = lastUnknownGroupAlert.get(warning);
+          if (last == null || now - last >= TimeUnit.MINUTES.toNanos(1)) {
+            lastUnknownGroupAlert.put(warning, now);
+            logger.warn("An authenticated backend attempted to join {}. Configure the group or correct its Nekopurr resume.", warning);
+            var notice = net.kyori.adventure.text.Component.text("A pairing backend requested " + warning
+                + ". Configure the group or correct its Nekopurr resume.");
+            server.getAllPlayers().stream().filter(player -> player.hasPermission("purroxy.notifications.discovery"))
+                .forEach(player -> player.sendMessage(notice));
+          }
+        }
+      }
       JsonObject error = new JsonObject();
       error.addProperty("type", "error");
       error.addProperty("code", failure.getMessage() != null

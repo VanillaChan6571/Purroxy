@@ -129,9 +129,10 @@ public final class DiscoveryService implements AutoCloseable {
   }
 
   /** Point-in-time view of one backend, for administrative display only. */
-  public record BackendStatus(String name, String group, String region, String state, boolean leaseValid,
-                              int players, int reservations, int safeLimit, int hardLimit,
-                              long wakeAgeSeconds, boolean managedSleep, boolean sleepPending) {
+  public record BackendStatus(String name, String group, String region, String host, int port,
+                              String state, boolean leaseValid, int players, int reservations,
+                              int safeLimit, int hardLimit, long wakeAgeSeconds, boolean managedSleep,
+                              boolean sleepPending) {
   }
 
   /** Snapshots every known backend so administrators can see why one is not accepting players. */
@@ -139,7 +140,8 @@ public final class DiscoveryService implements AutoCloseable {
     long now = System.nanoTime();
     return registry.snapshots().stream()
         .map(snapshot -> new BackendStatus(snapshot.resume().serverId(), snapshot.resume().group(),
-            snapshot.resume().region(), snapshot.state().name(), snapshot.leaseValid(),
+            snapshot.resume().region(), snapshot.resume().host(), snapshot.resume().port(),
+            snapshot.state().name(), snapshot.leaseValid(),
             snapshot.players(), snapshot.reservations(), snapshot.resume().safeLimit(),
             snapshot.resume().hardLimit(),
             waking.containsKey(snapshot.session())

@@ -69,6 +69,7 @@ public final class PurroxyCommand {
     for (var backend : backends) {
       StringBuilder line = new StringBuilder(backend.name())
           .append("  ").append(backend.group()).append('/').append(backend.region())
+          .append("  ").append(backend.host()).append(':').append(backend.port())
           .append("  ").append(backend.state())
           .append(backend.leaseValid() ? "" : " (lease expired)")
           .append("  players ").append(backend.players())

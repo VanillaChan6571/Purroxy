@@ -96,7 +96,12 @@ public final class PairingStore {
           }
           new BackendResume(value.name(), UUID.randomUUID(), value.host(), value.port(), value.group(), "none", 1, 1, "unknown");
         }
-        state = new State(state.token(), Map.copyOf(state.entries()));
+        Map<UUID, Entry> backfilled = backfillEntityIdBases(state.entries());
+        boolean assigned = backfilled != state.entries();
+        state = new State(state.token(), Map.copyOf(backfilled));
+        if (assigned) {
+          save(state); // Persist the assignment so it is stable across restarts.
+        }
       } catch (RuntimeException failure) {
         throw new IOException("Invalid pairing registry; refusing to replace existing credentials", failure);
       }
@@ -195,6 +200,30 @@ public final class PairingStore {
     save(next); // Do not acknowledge credentials until their assignment survives restart.
     state = next;
     return new Registration(resume, added.credential(), added.entityIdBase());
+  }
+
+  /**
+   * Gives a player entity id block to any backend enrolled before blocks existed. Without this an
+   * operator would have to re-pair or hand-configure each one, and the next backend they add would
+   * silently share a block with them. Deterministic by name so every proxy start agrees.
+   */
+  private static Map<UUID, Entry> backfillEntityIdBases(Map<UUID, Entry> entries) {
+    if (entries.values().stream().allMatch(entry -> entry.entityIdBase() > 0)) {
+      return entries;
+    }
+    int next = Math.max(entries.values().stream().mapToInt(Entry::entityIdBase).max().orElse(0),
+        PLAYER_ID_BASE - PLAYER_ID_SPACING);
+    Map<UUID, Entry> updated = new HashMap<>(entries);
+    for (UUID instance : entries.entrySet().stream()
+        .filter(entry -> entry.getValue().entityIdBase() <= 0)
+        .sorted(java.util.Comparator.comparing(entry -> entry.getValue().name()))
+        .map(Map.Entry::getKey).toList()) {
+      Entry entry = entries.get(instance);
+      next += PLAYER_ID_SPACING;
+      updated.put(instance, new Entry(entry.name(), entry.host(), entry.port(), entry.group(),
+          entry.credential(), entry.enrollmentHash(), next));
+    }
+    return updated;
   }
 
   private void publishChallenge() throws IOException {

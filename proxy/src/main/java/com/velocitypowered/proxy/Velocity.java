@@ -74,7 +74,15 @@ public class Velocity {
 
     double bootTime = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime) / 1000d;
     logger.info("Done ({}s)!", new DecimalFormat("#.##").format(bootTime));
-    server.getConsoleCommandSource().start();
+    try {
+      server.getConsoleCommandSource().start();
+    } catch (Throwable consoleFailure) {
+      // Returning normally is expected when no console is attached, but an exception here kills the
+      // main thread before anything requests a shutdown, and Netty's non-daemon threads then keep an
+      // unmanageable proxy alive forever. Shut down instead of leaving it running with no console.
+      logger.error("The console reader stopped unexpectedly; shutting the proxy down.", consoleFailure);
+      server.shutdown(true);
+    }
 
     // If we don't have a console available (because SimpleTerminalConsole returned), then we still
     // need to wait, otherwise the JVM will reap us as no non-daemon threads will be active once the

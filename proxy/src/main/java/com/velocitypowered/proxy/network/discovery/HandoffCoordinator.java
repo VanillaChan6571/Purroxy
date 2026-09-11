@@ -59,6 +59,9 @@ public final class HandoffCoordinator implements AutoCloseable {
   private final java.util.Map<UUID, Integer> requestedEntityIds = new ConcurrentHashMap<>();
   // What the destination actually reserved. Equal to the requested id means the client can keep it.
   private final java.util.Map<UUID, Integer> reservedEntityIds = new ConcurrentHashMap<>();
+  // Entities the source had shown this client. The proxy clears them rather than the source, so a
+  // source that dies after fencing cannot leave the client holding entities nothing will remove.
+  private final java.util.Map<UUID, int[]> sourceEntities = new ConcurrentHashMap<>();
   private final java.util.Map<UUID, Ticket> pendingReleases = new ConcurrentHashMap<>();
   private final ExecutorService io = Executors.newSingleThreadExecutor(task -> {
     Thread thread = new Thread(task, "purroxy-handoff-journal");
@@ -83,6 +86,11 @@ public final class HandoffCoordinator implements AutoCloseable {
     HandoffStore.Transfer transfer = store.get(player);
     return transfer != null && (transfer.phase() == HandoffStore.Phase.COMMITTED
         || transfer.phase() == HandoffStore.Phase.ABORTED && !rolledBackSources.contains(transfer.id()));
+  }
+
+  /** Entities the source had shown this client, to be removed before the destination populates. */
+  public int[] sourceEntities(UUID player) {
+    return sourceEntities.getOrDefault(player, new int[0]);
   }
 
   /** The entity id the destination reserved for this player, or 0 when none was negotiated. */
@@ -175,6 +183,14 @@ public final class HandoffCoordinator implements AutoCloseable {
         .thenCompose(transfer -> check(transfer, origin, target, valid, playerLoop))
         .thenCompose(transfer -> call(origin, transfer, "fence").thenApply(reply -> {
           expect(reply, transfer, "SOURCE", "FENCED");
+          if (reply.has("trackedEntities")) {
+            var reported = reply.getAsJsonArray("trackedEntities");
+            int[] ids = new int[reported.size()];
+            for (int index = 0; index < ids.length; index++) {
+              ids[index] = reported.get(index).getAsInt();
+            }
+            sourceEntities.put(transfer.player(), ids);
+          }
           return transfer;
         }))
         .thenCompose(transfer -> check(transfer, origin, target, valid, playerLoop))
@@ -279,6 +295,7 @@ public final class HandoffCoordinator implements AutoCloseable {
   public CompletableFuture<Void> finish(Ticket ticket, boolean connected) {
     requestedEntityIds.remove(ticket.player()); // The request belongs to this transfer only.
     reservedEntityIds.remove(ticket.player());
+    sourceEntities.remove(ticket.player());
     HandoffStore.Transfer transfer = store.get(ticket.player());
     if (transfer == null || !transfer.id().equals(ticket.transfer())
         || transfer.generation() != ticket.generation() || !transfer.destination().equals(ticket.destination())) {

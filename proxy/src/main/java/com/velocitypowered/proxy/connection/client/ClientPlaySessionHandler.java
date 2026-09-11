@@ -661,6 +661,15 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
       player.getConnection().delayedWrite(joinGame);
       // Required for Legacy Forge
       player.getPhase().onFirstJoin(player);
+    } else if (destination.isDetachedConfiguration()
+        && joinGame.getEntityId() == player.lastKnownEntityId()) {
+      // The destination kept the id this client already holds and its configuration matched, so the
+      // client needs neither JoinGame nor Respawn. Skipping them is what removes the loading screen.
+      // The source cleared the entities it had shown this client when it fenced, so the client's
+      // entity table is empty here and the destination's ids cannot alias stale ones.
+      player.getTabList().clearAll();
+      logger.info("Seamless switch to {}: keeping the client's world, no reset sent.",
+          destination.getServerInfo().getName());
     } else {
       // Clear tab list to avoid duplicate entries
       player.getTabList().clearAll();

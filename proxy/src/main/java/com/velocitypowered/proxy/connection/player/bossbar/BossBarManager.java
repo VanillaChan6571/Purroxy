@@ -76,4 +76,12 @@ public final class BossBarManager {
   public synchronized void dropPackets() {
     this.dropPackets = true;
   }
+
+  /** Hides subscribed bars before a PLAY reset; sendBossBars restores them afterwards. */
+  public synchronized void preparePlayReset() {
+    for (VelocityBossBarImplementation bossBar : bossBars) {
+      bossBar.removeDirect(player);
+    }
+    this.dropPackets = true;
+  }
 }

@@ -240,8 +240,17 @@ public final class DiscoveryService implements AutoCloseable {
       group = registry.snapshots().stream().filter(snapshot -> snapshot.resume().serverId().equals(destination))
           .map(snapshot -> snapshot.resume().group()).findFirst().orElse("");
     }
+    // The client already holds the source's entity id; ask the destination to keep it so a seamless
+    // switch need not reset the client. The destination refuses if that id is taken.
+    // Prefer the live connection, but fall back to the last id we saw for this player: a backend that
+    // died takes its connection with it, and the client still holds the id it was given.
+    int requestedEntityId = 0;
+    if (player instanceof com.velocitypowered.proxy.connection.client.ConnectedPlayer connected) {
+      requestedEntityId = connected.getConnectedServer() != null
+          ? connected.getConnectedServer().getEntityId() : connected.lastKnownEntityId();
+    }
     return handoff.prepare(player.getUniqueId(), source, destination,
-        configuration.handoffModes().getOrDefault(group, "off"), valid, playerLoop);
+        configuration.handoffModes().getOrDefault(group, "off"), valid, playerLoop, requestedEntityId);
   }
 
   /** Finalizes source release only after Velocity reports a successful destination connection. */
@@ -260,6 +269,25 @@ public final class DiscoveryService implements AutoCloseable {
 
   public boolean needsHandoffRecovery(UUID player) {
     return handoff != null && handoff.requiresRecovery(player);
+  }
+
+  /** Allows detached negotiation only for the committed destination in preferred mode. */
+  public synchronized boolean allowsDetachedConfiguration(UUID player, String source, String destination) {
+    Optional<HandoffCoordinator.Peer> from = handoffPeer(source);
+    Optional<HandoffCoordinator.Peer> to = handoffPeer(destination);
+    return handoff != null && handoff.recoveryOwner(player).filter(destination::equals).isPresent()
+        && from.isPresent() && to.isPresent()
+        && from.get().capabilities().matches(to.get().capabilities())
+        && registry.snapshots().stream().filter(snapshot -> snapshot.resume().serverId().equals(destination))
+        .anyMatch(snapshot -> configuration.handoffModes().getOrDefault(snapshot.resume().group(), "off")
+            .equals("seamless-preferred"));
+  }
+
+  /** Captures native configuration only for explicitly selected seamless testing modes. */
+  public synchronized boolean captureSeamlessBaseline(String backend) {
+    return registry.snapshots().stream().filter(snapshot -> snapshot.resume().serverId().equals(backend))
+        .map(snapshot -> configuration.handoffModes().getOrDefault(snapshot.resume().group(), "off"))
+        .anyMatch(mode -> mode.equals("seamless-preferred") || mode.equals("seamless-required"));
   }
 
   /** Installs the TLS control path after the unencrypted protocol discriminator. */
@@ -573,6 +601,7 @@ public final class DiscoveryService implements AutoCloseable {
       if (handoff != null && System.nanoTime() >= nextReleaseRetry) {
         nextReleaseRetry = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         handoff.retryReleases();
+        handoff.recoverAborts();
       }
       for (Admission admission : java.util.List.copyOf(admissions.values())) {
         if (System.nanoTime() - admission.created() >= TimeUnit.SECONDS.toNanos(30)) {
@@ -875,6 +904,9 @@ public final class DiscoveryService implements AutoCloseable {
         if (paired != null) {
           response.addProperty("serverId", paired.resume().serverId());
           response.addProperty("credential", paired.credential());
+          // The proxy is the authority for entity id ranges, as it is for names: a backend that
+          // allocates within its own range can never mint an id another backend is already using.
+          response.addProperty("entityIdBase", paired.entityIdBase());
           response.addProperty("sleepManaged", true);
           synchronized (DiscoveryService.this) {
             managedSleep.add(session);

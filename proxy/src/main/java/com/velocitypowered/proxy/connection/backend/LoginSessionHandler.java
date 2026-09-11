@@ -157,9 +157,13 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
     if (smc.getProtocolVersion().lessThan(ProtocolVersion.MINECRAFT_1_20_2)) {
       smc.setActiveSessionHandler(StateRegistry.PLAY, new TransitionSessionHandler(server, serverConn, resultFuture));
     } else {
+      if (tryDetachedConfiguration(smc)) {
+        return true;
+      }
       smc.write(new LoginAcknowledgedPacket());
       ConfigSessionHandler configurationHandler = new ConfigSessionHandler(server, serverConn, resultFuture);
-      smc.setActiveSessionHandler(StateRegistry.CONFIG, server.getDiscovery() == null ? configurationHandler
+      smc.setActiveSessionHandler(StateRegistry.CONFIG, server.getDiscovery() == null
+          || !server.getDiscovery().captureSeamlessBaseline(serverConn.getServerInfo().getName()) ? configurationHandler
           : new ObservedConfigSessionHandler(configurationHandler, serverConn));
       ConnectedPlayer player = serverConn.getPlayer();
       if (player.getClientSettingsPacket() != null) {
@@ -194,6 +198,73 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
           }
         }, serverConn.ensureConnected().eventLoop());
 
+    return true;
+  }
+
+  private boolean tryDetachedConfiguration(MinecraftConnection backend) {
+    ConnectedPlayer player = serverConn.getPlayer();
+    VelocityServerConnection source = player.getConnectedServer();
+    SeamlessConfiguration.Baseline baseline = player.seamlessBaseline();
+    if (serverConn.detachedAttempted || source == null || !source.isActive() || baseline == null
+        || player.getProtocolVersion() != ProtocolVersion.MINECRAFT_26_2
+        || backend.getProtocolVersion() != ProtocolVersion.MINECRAFT_26_2
+        || player.getConnection().getType() != com.velocitypowered.proxy.connection.ConnectionTypes.VANILLA
+        || !(player.getConnection().getActiveSessionHandler() instanceof ClientPlaySessionHandler)
+        || server.getDiscovery() == null || !server.getDiscovery().allowsDetachedConfiguration(
+            player.getUniqueId(), source.getServerInfo().getName(), serverConn.getServerInfo().getName())) {
+      return false;
+    }
+    serverConn.detachedAttempted = true;
+    serverConn.detachedConfiguration = true;
+    serverConn.detachedSource = source;
+    serverConn.detachedBaseline = baseline;
+    CompletableFuture<Void> negotiation = new CompletableFuture<>();
+    resultFuture.whenComplete((result, failure) -> {
+      if (resultFuture.isCancelled()) {
+        negotiation.cancel(false);
+      }
+    });
+    negotiation.whenComplete((ignored, failure) -> {
+      if (failure == null) {
+        logger.info("Detached configuration: {} negotiated with the client remaining in PLAY; using the reset join path.",
+            serverConn.getServerInfo().getName());
+        return;
+      }
+      // Retry login once through the ordinary configuration path. The committed handoff is
+      // retained: a failed probe must never restore ownership to the source after commit.
+      backend.close();
+      backend.eventLoop().execute(() -> {
+        serverConn.detachedConfiguration = false;
+        serverConn.detachedSource = null;
+        if (!player.isActive() || player.getConnectionInFlight() != serverConn || resultFuture.isDone()) {
+          resultFuture.completeExceptionally(failure);
+          return;
+        }
+        logger.info("Detached configuration: {} fell back to normal configuration ({}).",
+            serverConn.getServerInfo().getName(), failure.getMessage());
+        try {
+          serverConn.connect().whenComplete((result, retryFailure) -> {
+            if (retryFailure != null) {
+              resultFuture.completeExceptionally(retryFailure);
+            } else {
+              resultFuture.complete(result);
+            }
+          });
+        } catch (RuntimeException retryFailure) {
+          resultFuture.completeExceptionally(retryFailure);
+        }
+      });
+    });
+    backend.write(new LoginAcknowledgedPacket());
+    backend.setActiveSessionHandler(StateRegistry.CONFIG, new SeamlessConfigSessionHandler(backend,
+        new TransitionSessionHandler(server, serverConn, resultFuture), baseline, negotiation,
+        () -> !resultFuture.isDone() && player.isActive() && source.isActive()
+            && player.getConnectionInFlight() == serverConn && player.getConnectedServer() == source
+            && player.seamlessBaseline() == baseline
+            && player.getConnection().getActiveSessionHandler() instanceof ClientPlaySessionHandler));
+    if (player.getClientSettingsPacket() != null) {
+      backend.write(player.getClientSettingsPacket());
+    }
     return true;
   }
 

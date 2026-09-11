@@ -94,6 +94,14 @@ public class TransitionSessionHandler implements MinecraftSessionHandler {
     final ConnectedPlayer player = serverConn.getPlayer();
     final VelocityServerConnection existingConnection = player.getConnectedServer();
 
+    if (serverConn.detachedConfiguration && (existingConnection != serverConn.detachedSource
+        || player.seamlessBaseline() != serverConn.detachedBaseline
+        || !(player.getConnection().getActiveSessionHandler() instanceof ClientPlaySessionHandler))) {
+      serverConn.disconnect();
+      resultFuture.completeExceptionally(new IllegalStateException("Client state changed during detached configuration"));
+      return true;
+    }
+
     if (server.getDiscovery() != null && !server.getDiscovery().canComplete(
         player.getUniqueId(), serverConn.getServerInfo().getName())) {
       serverConn.disconnect();
@@ -113,6 +121,10 @@ public class TransitionSessionHandler implements MinecraftSessionHandler {
     }
 
     // Reset Tablist header and footer to prevent desync
+    if (serverConn.detachedConfiguration && player.getBundleHandler().isInBundleSession()) {
+      player.getBundleHandler().toggleBundleSession();
+      player.getConnection().write(com.velocitypowered.proxy.protocol.packet.BundleDelimiterPacket.INSTANCE);
+    }
     player.clearPlayerListHeaderAndFooter();
 
     // Override online mode

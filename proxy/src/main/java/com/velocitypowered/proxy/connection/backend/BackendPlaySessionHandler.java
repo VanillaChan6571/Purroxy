@@ -179,18 +179,19 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
 
   @Override
   public boolean handle(BossBarPacket packet) {
-    if (serverConn.getPlayer().getProtocolVersion().lessThan(ProtocolVersion.MINECRAFT_1_20_2)) {
-      if (packet.getAction() == BossBarPacket.ADD) {
+    if (packet.getAction() == BossBarPacket.ADD) {
+      if (!playerSessionHandler.getServerBossBars().contains(packet.getUuid())) {
         playerSessionHandler.getServerBossBars().add(packet.getUuid());
-      } else if (packet.getAction() == BossBarPacket.REMOVE) {
-        playerSessionHandler.getServerBossBars().remove(packet.getUuid());
       }
+    } else if (packet.getAction() == BossBarPacket.REMOVE) {
+      playerSessionHandler.getServerBossBars().remove(packet.getUuid());
     }
     return false; // forward
   }
 
   @Override
   public boolean handle(final ResourcePackRequestPacket packet) {
+    serverConn.getPlayer().setSeamlessBaseline(null);
     final ResourcePackInfo.Builder builder = new VelocityResourcePackInfo.BuilderImpl(
         Preconditions.checkNotNull(packet.getUrl()))
         .setId(packet.getId())
@@ -467,6 +468,14 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
 
   @Override
   public void handleUnknown(ByteBuf buf) {
+    if (serverConn.getPlayer().getProtocolVersion() == ProtocolVersion.MINECRAFT_26_2) {
+      // Native 26.2 GameProtocols: PLAY tags, report details and server links can
+      // change configuration after its capture. These packets are forwarded opaquely.
+      int packetId = com.velocitypowered.proxy.protocol.ProtocolUtils.readVarInt(buf.duplicate());
+      if (packetId == 0x86 || packetId == 0x88 || packetId == 0x89) {
+        serverConn.getPlayer().setSeamlessBaseline(null);
+      }
+    }
     boolean huge = buf.readableBytes() > LARGE_PACKET_THRESHOLD;
     playerConnection.delayedWrite(buf.retain());
     if (huge || ++packetsFlushed >= MAXIMUM_PACKETS_TO_FLUSH) {

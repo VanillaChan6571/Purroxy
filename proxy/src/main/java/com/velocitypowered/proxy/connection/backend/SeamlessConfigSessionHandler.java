@@ -33,13 +33,20 @@ final class SeamlessConfigSessionHandler implements MinecraftSessionHandler {
   private final SeamlessConfiguration negotiation;
   private final CompletableFuture<Void> result;
   private ScheduledFuture<?> timeout;
+  private final java.util.function.BooleanSupplier valid;
 
   SeamlessConfigSessionHandler(MinecraftConnection backend, MinecraftSessionHandler next,
       SeamlessConfiguration.Baseline baseline, CompletableFuture<Void> result) {
+    this(backend, next, baseline, result, () -> true);
+  }
+
+  SeamlessConfigSessionHandler(MinecraftConnection backend, MinecraftSessionHandler next,
+      SeamlessConfiguration.Baseline baseline, CompletableFuture<Void> result, java.util.function.BooleanSupplier valid) {
     this.backend = backend;
     this.next = next;
     this.negotiation = new SeamlessConfiguration(baseline, backend.getProtocolVersion());
     this.result = result;
+    this.valid = valid;
     result.whenComplete((ignored, failure) -> {
       if (result.isCancelled()) {
         backend.eventLoop().execute(() -> {
@@ -68,6 +75,9 @@ final class SeamlessConfigSessionHandler implements MinecraftSessionHandler {
       return;
     }
     try {
+      if (!valid.getAsBoolean()) {
+        throw new IllegalStateException("Client state changed during detached configuration");
+      }
       negotiation.accept(packet).ifPresent(backend::write);
       if (negotiation.complete()) {
         // The finish acknowledgment must be encoded in CONFIG before switching backend codecs.

@@ -61,7 +61,7 @@ The native 26.2 implementation now includes a backend-only configuration negotia
 engine and session handler. Normal backend negotiations capture bounded SHA-256
 fingerprints of registries, active features, tags, known-pack offers, brand and
 report/link metadata. The client's actual known-pack selection is copied for replay.
-Capturing is active only when discovery is enabled and the protocol is native 26.2.
+Capturing is active only for the preferred/required seamless discovery modes and native 26.2.
 Unsupported configuration exchanges invalidate eligibility without changing ordinary
 packet handling. Resource-pack changes, cookies, custom handshakes and unknown packets
 are not silently acknowledged.
@@ -77,14 +77,14 @@ matching, registry/tag mismatch, early finish, duplicate selection, unsupported 
 or plugin exchanges, buffer ownership, oversized capture, acknowledgment order,
 timeout, cancellation and preservation of ordinary packet dispatch.
 
-This handler is **not yet installed for live switches**. A captured backend baseline
-is not proof of the client's complete current state: proxy configuration plugins,
-later PLAY updates and client acknowledgment still need qualification. Activation
-also requires player/entity identity reconciliation, chunk/entity cleanup and chat-state
-handling. The
-existing `LoginSessionHandler` invokes `ClientPlaySessionHandler.doSwitch()` and
-`ConfigSessionHandler` forwards configuration traffic to the client; suppressing only
-JoinGame or Respawn would leave that state transition unresolved.
+The handler is now installed for eligible committed `seamless-preferred` transfers;
+see [detached configuration wiring](DETACHED_CONFIGURATION.md). The matching path
+skips `doSwitch()` and keeps the client in PLAY during backend configuration.
+It still uses JoinGame/Respawn to reset client state and adopt the destination's
+entity ID, so terrain loading can remain. This is not full screen-free continuity.
+Mismatches retry ordinary configuration once, retaining committed player ownership.
+`seamless-required` remains unavailable. Native client testing and qualification of
+proxy configuration plugins/translators are still necessary.
 
 Live two-backend tests with a native 26.2 client, injected process/control failures,
 and repeated transfers remain required. ViaVersion/ViaBackwards continuity is not

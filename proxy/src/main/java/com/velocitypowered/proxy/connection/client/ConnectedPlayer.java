@@ -180,6 +180,12 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   private final boolean onlineMode;
   private @Nullable VelocityServerConnection connectedServer;
   private @Nullable VelocityServerConnection connectionInFlight;
+  // The configuration baseline outlives the connection that produced it: a seamless switch has to
+  // compare the NEXT backend's negotiation against what this client was actually configured with.
+  private volatile com.velocitypowered.proxy.connection.backend.SeamlessConfiguration.@Nullable Baseline seamlessBaseline;
+  // Survives the backend connection that issued it, so a restarted or dead backend does not lose the
+  // id the client is still using. Lives only as long as this player's proxy session.
+  private volatile int lastKnownEntityId;
   private @Nullable PlayerSettings settings;
   private @Nullable ModInfo modInfo;
   private final Set<VelocityBossBarImplementation> bossBars = new HashSet<>();
@@ -659,6 +665,27 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
     return connectedServer;
   }
 
+  /** The entity id this client was most recently given, even if that backend has since gone away. */
+  public int lastKnownEntityId() {
+    return lastKnownEntityId;
+  }
+
+  /** Records the entity id a backend assigned, so a later handoff can ask for it again. */
+  public void setLastKnownEntityId(int entityId) {
+    this.lastKnownEntityId = entityId;
+  }
+
+  /** The configuration this client was last successfully negotiated with, if it is still usable. */
+  public com.velocitypowered.proxy.connection.backend.SeamlessConfiguration.@Nullable Baseline seamlessBaseline() {
+    return seamlessBaseline;
+  }
+
+  /** Records the configuration baseline observed on a completed backend negotiation. */
+  public void setSeamlessBaseline(
+      com.velocitypowered.proxy.connection.backend.SeamlessConfiguration.@Nullable Baseline baseline) {
+    this.seamlessBaseline = baseline;
+  }
+
   public @Nullable VelocityServerConnection getConnectionInFlight() {
     return connectionInFlight;
   }
@@ -932,6 +959,7 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
     this.tryIndex = 0; // reset since we got connected to a server
     if (serverConnection != null) {
       discoveryServersTried.clear();
+      serverConnection.publishConfigurationBaseline();
     }
 
     if (serverConnection == connectionInFlight) {

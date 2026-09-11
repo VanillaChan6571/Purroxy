@@ -69,11 +69,27 @@ public class VelocityServerConnection implements MinecraftConnectionAssociation,
   private @Nullable MinecraftConnection connection;
   private boolean hasCompletedJoin = false;
   private boolean clientLoaded = false; // 1.21.4+
+  boolean detachedAttempted;
+  boolean detachedConfiguration;
+  @Nullable VelocityServerConnection detachedSource;
+  SeamlessConfiguration.@Nullable Baseline detachedBaseline;
   private boolean gracefulDisconnect = false;
   private BackendConnectionPhase connectionPhase = BackendConnectionPhases.UNKNOWN;
   private final Map<Long, Long> pendingPings = new HashMap<>();
   private @MonotonicNonNull Integer entityId;
   SeamlessConfiguration.Capture configurationCapture = new SeamlessConfiguration.Capture(ProtocolVersion.UNKNOWN);
+
+  /** Whether this connection negotiated configuration while its client stayed in PLAY. */
+  public boolean isDetachedConfiguration() {
+    return detachedConfiguration;
+  }
+
+  /** Publishes the normal negotiation only after this backend becomes the client's owner. */
+  public void publishConfigurationBaseline() {
+    if (!detachedConfiguration) {
+      proxyPlayer.setSeamlessBaseline(configurationCapture.baseline().orElse(null));
+    }
+  }
 
   /** Records the actual client's known-pack selection for a future native configuration comparison. */
   public void recordKnownPacks(com.velocitypowered.proxy.protocol.packet.config.KnownPacksPacket packet) {

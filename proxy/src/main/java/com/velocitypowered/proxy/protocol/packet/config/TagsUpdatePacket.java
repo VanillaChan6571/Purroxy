@@ -81,6 +81,24 @@ public class TagsUpdatePacket implements MinecraftPacket {
     return handler.handle(this);
   }
 
+  /**
+   * Encodes a comparison snapshot with sorted map keys, without changing the wire encoder.
+   * Numeric tag member IDs, their order, duplicate members and empty tags are preserved.
+   *
+   * @param buf destination for the comparison snapshot
+   */
+  public void encodeCanonical(ByteBuf buf) {
+    ProtocolUtils.writeVarInt(buf, tags.size());
+    for (Map.Entry<String, Map<String, int[]>> registry : new java.util.TreeMap<>(tags).entrySet()) {
+      ProtocolUtils.writeString(buf, registry.getKey());
+      ProtocolUtils.writeVarInt(buf, registry.getValue().size());
+      for (Map.Entry<String, int[]> tag : new java.util.TreeMap<>(registry.getValue()).entrySet()) {
+        ProtocolUtils.writeString(buf, tag.getKey());
+        ProtocolUtils.writeVarIntArray(buf, tag.getValue());
+      }
+    }
+  }
+
   @Override
   public int encodeSizeHint(Direction direction, ProtocolVersion version) {
     int size = ProtocolUtils.varIntBytes(tags.size());

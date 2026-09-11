@@ -38,18 +38,23 @@ import java.util.List;
 import java.util.Optional;
 
 /** Strict native configuration negotiation without sending configuration packets to a PLAY client. */
-final class SeamlessConfiguration {
+public final class SeamlessConfiguration {
   private static final int MAX_BYTES = 8 * 1024 * 1024;
   private static final int MAX_PACKETS = 1024;
 
-  private record Fingerprint(Class<?> type, byte[] digest) {
+  private record Fingerprint(Class<?> type, byte[] digest, byte[] wireDigest, int size, String detail) {
     boolean matches(Fingerprint other) {
       return type == other.type && MessageDigest.isEqual(digest, other.digest);
+    }
+
+    String describe() {
+      return type.getSimpleName() + detail + ", " + size + " bytes, sha256="
+          + java.util.HexFormat.of().formatHex(digest, 0, 8);
     }
   }
 
   /** Immutable backend baseline from this client's normal negotiation, pending live-state qualification. */
-  static final class Baseline {
+  public static final class Baseline {
     private final List<Fingerprint> packets;
     private final byte[] knownPacksReply;
 
@@ -146,7 +151,7 @@ final class SeamlessConfiguration {
       knownPacksReply = null;
     }
 
-    Optional<Baseline> baseline() {
+    public Optional<Baseline> baseline() {
       return !invalid && finished && features && tags && registries > 0 && knownPacksReply != null
           ? Optional.of(new Baseline(packets, knownPacksReply)) : Optional.empty();
     }
@@ -157,6 +162,7 @@ final class SeamlessConfiguration {
   private int bytes;
   private boolean finished;
   private boolean failed;
+  private boolean reorderedTags;
 
   SeamlessConfiguration(Baseline baseline, ProtocolVersion version) {
     if (version != ProtocolVersion.MINECRAFT_26_2) {
@@ -186,8 +192,17 @@ final class SeamlessConfiguration {
       }
       byte[] payload = encode(packet, ProtocolUtils.Direction.CLIENTBOUND);
       bytes = Math.addExact(bytes, payload.length);
-      if (bytes > MAX_BYTES || !baseline.packets.get(cursor).matches(fingerprint(packet, payload))) {
-        throw new IllegalStateException("Destination configuration differs from the client baseline");
+      if (bytes > MAX_BYTES) {
+        throw new IllegalStateException("Destination configuration exceeds capture limit");
+      }
+      Fingerprint expected = baseline.packets.get(cursor);
+      Fingerprint actual = fingerprint(packet, payload);
+      if (!expected.matches(actual)) {
+        throw new IllegalStateException("Configuration mismatch at data packet #" + (cursor + 1)
+            + ": expected [" + expected.describe() + "], received [" + actual.describe() + "]");
+      }
+      if (packet instanceof TagsUpdatePacket && !MessageDigest.isEqual(expected.wireDigest, actual.wireDigest)) {
+        reorderedTags = true;
       }
       cursor++;
       if (packet instanceof KnownPacksPacket) {
@@ -211,6 +226,14 @@ final class SeamlessConfiguration {
     return finished && !failed;
   }
 
+  boolean matchesSelection(Baseline observed) {
+    return MessageDigest.isEqual(baseline.knownPacksReply, observed.knownPacksReply);
+  }
+
+  boolean reorderedTags() {
+    return reorderedTags;
+  }
+
   private static boolean supported(MinecraftPacket packet) {
     return packet instanceof KnownPacksPacket || packet instanceof RegistrySyncPacket
         || packet instanceof ActiveFeaturesPacket || packet instanceof TagsUpdatePacket
@@ -222,9 +245,38 @@ final class SeamlessConfiguration {
 
   private static Fingerprint fingerprint(MinecraftPacket packet, byte[] payload) {
     try {
-      return new Fingerprint(packet.getClass(), MessageDigest.getInstance("SHA-256").digest(payload));
+      byte[] wireDigest = MessageDigest.getInstance("SHA-256").digest(payload);
+      byte[] comparisonDigest = wireDigest;
+      if (packet instanceof TagsUpdatePacket tags) {
+        ByteBuf canonical = Unpooled.buffer(256, MAX_BYTES);
+        try {
+          tags.encodeCanonical(canonical);
+          comparisonDigest = MessageDigest.getInstance("SHA-256").digest(ByteBufUtil.getBytes(canonical));
+        } finally {
+          canonical.release();
+        }
+      }
+      return new Fingerprint(packet.getClass(), comparisonDigest, wireDigest,
+          payload.length, describePayload(packet, payload));
     } catch (NoSuchAlgorithmException impossible) {
       throw new AssertionError(impossible);
+    }
+  }
+
+  private static String describePayload(MinecraftPacket packet, byte[] payload) {
+    if (!(packet instanceof RegistrySyncPacket)) {
+      return "";
+    }
+    // Native 26.2 encodes the registry identifier before the entry list and its NBT.
+    // Read only that bounded prefix, leaving the original deferred packet untouched.
+    ByteBuf buffer = Unpooled.wrappedBuffer(payload);
+    try {
+      String registry = ProtocolUtils.readString(buffer, 256);
+      return registry.matches("[a-z0-9_.-]+:[a-z0-9_./-]+") ? " registry=" + registry : " registry=<invalid>";
+    } catch (RuntimeException malformed) {
+      return " registry=<unreadable>";
+    } finally {
+      buffer.release();
     }
   }
 

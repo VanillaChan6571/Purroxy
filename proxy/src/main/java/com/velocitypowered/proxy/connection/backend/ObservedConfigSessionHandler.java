@@ -19,12 +19,20 @@ package com.velocitypowered.proxy.connection.backend;
 
 import com.velocitypowered.proxy.connection.MinecraftSessionHandler;
 import com.velocitypowered.proxy.protocol.MinecraftPacket;
+import com.velocitypowered.proxy.protocol.packet.config.FinishedUpdatePacket;
 import io.netty.buffer.ByteBuf;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 /** Captures a normal backend negotiation without changing its existing packet handling. */
 final class ObservedConfigSessionHandler implements MinecraftSessionHandler {
+  private static final Logger logger = LogManager.getLogger(ObservedConfigSessionHandler.class);
   private final MinecraftSessionHandler delegate;
   private final VelocityServerConnection connection;
+  // Shadow comparison only: this never writes to either connection and never changes the switch.
+  private SeamlessConfiguration shadow;
+  private String shadowFailure;
+  private int shadowIndex;
 
   ObservedConfigSessionHandler(MinecraftSessionHandler delegate, VelocityServerConnection connection) {
     this.delegate = delegate;
@@ -34,6 +42,15 @@ final class ObservedConfigSessionHandler implements MinecraftSessionHandler {
   @Override
   public void activated() {
     connection.configurationCapture = new SeamlessConfiguration.Capture(connection.ensureConnected().getProtocolVersion());
+    SeamlessConfiguration.Baseline previous =
+        connection.getPlayer() == null ? null : connection.getPlayer().seamlessBaseline();
+    if (previous != null) {
+      try {
+        shadow = new SeamlessConfiguration(previous, connection.ensureConnected().getProtocolVersion());
+      } catch (RuntimeException unusable) {
+        shadowFailure = "baseline unusable: " + unusable.getMessage();
+      }
+    }
     delegate.activated();
   }
 
@@ -45,14 +62,65 @@ final class ObservedConfigSessionHandler implements MinecraftSessionHandler {
   @Override
   public void handleGeneric(MinecraftPacket packet) {
     connection.configurationCapture.observe(packet);
+    compare(packet);
+    if (packet instanceof FinishedUpdatePacket && connection.getPlayer() != null) {
+      SeamlessConfiguration.Baseline captured = connection.configurationCapture.baseline().orElse(null);
+      if (shadow != null && shadowFailure == null) {
+        if (captured == null || !shadow.complete()) {
+          shadowFailure = "negotiation could not produce a complete supported baseline";
+        } else if (!shadow.matchesSelection(captured)) {
+          shadowFailure = "client known-packs selection changed between negotiations";
+        }
+      }
+      report();
+      // Publish only when this backend actually completes the client switch.
+    }
     if (!packet.handle(delegate)) {
       delegate.handleGeneric(packet);
+    }
+  }
+
+  /** Replays this negotiation against the client's existing baseline without acting on the result. */
+  private void compare(MinecraftPacket packet) {
+    if (shadow == null || shadowFailure != null) {
+      return;
+    }
+    try {
+      shadow.accept(packet);
+      shadowIndex++;
+    } catch (RuntimeException mismatch) {
+      // Name the offending packet: the reason alone cannot tell a brand difference from a registry one.
+      shadowFailure = mismatch.getMessage() + " at packet #" + shadowIndex + " ("
+          + packet.getClass().getSimpleName() + describeSize(packet) + ")";
+    }
+  }
+
+  private static String describeSize(MinecraftPacket packet) {
+    return packet instanceof io.netty.buffer.ByteBufHolder holder
+        ? ", " + holder.content().readableBytes() + " bytes" : "";
+  }
+
+  private void report() {
+    if (shadow == null) {
+      return;
+    }
+    String server = connection.getServerInfo() == null ? "backend" : connection.getServerInfo().getName();
+    if (shadowFailure == null && shadow.reorderedTags()) {
+      logger.info("Seamless check: {} matched this client's configuration after normalizing tag-map order.", server);
+    } else if (shadowFailure == null) {
+      logger.info("Seamless check: {} negotiated identically to this client's existing configuration.", server);
+    } else {
+      logger.info("Seamless check: {} diverged from this client's existing configuration ({}).",
+          server, shadowFailure);
     }
   }
 
   @Override
   public void handleUnknown(ByteBuf packet) {
     connection.configurationCapture.invalidate();
+    if (shadowFailure == null) {
+      shadowFailure = "unrecognized configuration packet (" + packet.readableBytes() + " bytes)";
+    }
     delegate.handleUnknown(packet);
   }
 

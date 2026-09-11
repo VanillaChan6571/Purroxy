@@ -34,6 +34,9 @@ import org.checkerframework.checker.nullness.qual.Nullable;
 
 /** Single-proxy coordinator. The persisted decision, not an RPC timeout, determines ownership. */
 public final class HandoffCoordinator implements AutoCloseable {
+  private static final org.apache.logging.log4j.Logger logger =
+      org.apache.logging.log4j.LogManager.getLogger(HandoffCoordinator.class);
+
   /** An authenticated backend incarnation and its advertised replica contract. */
   public record Peer(String name, UUID session, HandoffCapabilities capabilities) {}
 
@@ -51,6 +54,11 @@ public final class HandoffCoordinator implements AutoCloseable {
   private final Transport transport;
   private final Set<UUID> active = ConcurrentHashMap.newKeySet();
   private final Set<UUID> rolledBackSources = ConcurrentHashMap.newKeySet();
+  private final java.util.Map<UUID, UUID> recoveredAborts = new ConcurrentHashMap<>();
+  // The entity id the client already holds on the source, asked of the destination at stage time.
+  private final java.util.Map<UUID, Integer> requestedEntityIds = new ConcurrentHashMap<>();
+  // What the destination actually reserved. Equal to the requested id means the client can keep it.
+  private final java.util.Map<UUID, Integer> reservedEntityIds = new ConcurrentHashMap<>();
   private final java.util.Map<UUID, Ticket> pendingReleases = new ConcurrentHashMap<>();
   private final ExecutorService io = Executors.newSingleThreadExecutor(task -> {
     Thread thread = new Thread(task, "purroxy-handoff-journal");
@@ -77,9 +85,25 @@ public final class HandoffCoordinator implements AutoCloseable {
         || transfer.phase() == HandoffStore.Phase.ABORTED && !rolledBackSources.contains(transfer.id()));
   }
 
+  /** The entity id the destination reserved for this player, or 0 when none was negotiated. */
+  public int reservedEntityId(UUID player) {
+    return reservedEntityIds.getOrDefault(player, 0);
+  }
+
   /** Executes export, stage, source fence, durable commit, then destination commit. */
   public CompletableFuture<@Nullable Ticket> prepare(UUID player, @Nullable String source, String destination,
                                                      String mode, BooleanSupplier valid, Executor playerLoop) {
+    return prepare(player, source, destination, mode, valid, playerLoop, 0);
+  }
+
+  /**
+   * As above, additionally asking the destination to keep {@code requestedEntityId} for this player so
+   * the client need not be reset. Zero asks for nothing and the destination allocates its own id.
+   */
+  public CompletableFuture<@Nullable Ticket> prepare(UUID player, @Nullable String source, String destination,
+                                                     String mode, BooleanSupplier valid, Executor playerLoop,
+                                                     int requestedEntityId) {
+    requestedEntityIds.put(player, requestedEntityId);
     if (!active.add(player)) {
       return CompletableFuture.failedFuture(new IllegalStateException("A player handoff is already running"));
     }
@@ -136,7 +160,16 @@ public final class HandoffCoordinator implements AutoCloseable {
           return onIo(() -> store.update(transfer.withPosition(position)));
         }))
         .thenCompose(transfer -> call(target, transfer, "stage").thenApply(reply -> {
-          expect(reply, transfer, "DESTINATION", "STAGED");
+          JsonObject staged = expect(reply, transfer, "DESTINATION", "STAGED");
+          // The destination reserves the id before the client connects, so its reply says whether the
+          // client keeps the id it already holds. A different id means the client must still be reset.
+          int reserved = staged.has("requestedEntityId") ? staged.get("requestedEntityId").getAsInt() : 0;
+          int asked = requestedEntityIds.getOrDefault(transfer.player(), 0);
+          if (reserved > 0 && asked > 0) {
+            logger.info("Handoff to {}: destination reserved entity id {} for a client holding {}{}",
+                transfer.destination(), reserved, asked, reserved == asked ? " (kept)" : " (changed)");
+          }
+          reservedEntityIds.put(transfer.player(), reserved);
           return transfer;
         }))
         .thenCompose(transfer -> check(transfer, origin, target, valid, playerLoop))
@@ -244,6 +277,8 @@ public final class HandoffCoordinator implements AutoCloseable {
 
   /** Releases the fenced source only after the destination became the live connection. */
   public CompletableFuture<Void> finish(Ticket ticket, boolean connected) {
+    requestedEntityIds.remove(ticket.player()); // The request belongs to this transfer only.
+    reservedEntityIds.remove(ticket.player());
     HandoffStore.Transfer transfer = store.get(ticket.player());
     if (transfer == null || !transfer.id().equals(ticket.transfer())
         || transfer.generation() != ticket.generation() || !transfer.destination().equals(ticket.destination())) {
@@ -278,6 +313,20 @@ public final class HandoffCoordinator implements AutoCloseable {
     return CompletableFuture.allOf(attempts.toArray(CompletableFuture[]::new));
   }
 
+  /** Reconciles durable aborts when backend control connections return, without waiting for a login. */
+  public CompletableFuture<Void> recoverAborts() {
+    java.util.List<CompletableFuture<Void>> attempts = new java.util.ArrayList<>();
+    for (HandoffStore.Transfer transfer : store.snapshot().values()) {
+      if (transfer.phase() != HandoffStore.Phase.ABORTED
+          || transfer.id().equals(recoveredAborts.get(transfer.player())) || !active.add(transfer.player())) {
+        continue;
+      }
+      attempts.add(rollback(transfer).thenRun(() -> recoveredAborts.put(transfer.player(), transfer.id()))
+          .whenComplete((ignored, failure) -> active.remove(transfer.player())).exceptionally(failure -> null));
+    }
+    return CompletableFuture.allOf(attempts.toArray(CompletableFuture[]::new));
+  }
+
   private CompletableFuture<JsonObject> call(Peer peer, HandoffStore.Transfer transfer, String action) {
     JsonObject request = new JsonObject();
     request.addProperty("action", action);
@@ -287,6 +336,9 @@ public final class HandoffCoordinator implements AutoCloseable {
     request.addProperty("source", transfer.source());
     request.addProperty("destination", transfer.destination());
     request.addProperty("profile", "hub-position");
+    if ("stage".equals(action)) {
+      request.addProperty("requestedEntityId", requestedEntityIds.getOrDefault(transfer.player(), 0));
+    }
     request.addProperty("expiresAtMillis", transfer.phase() == HandoffStore.Phase.COMMITTED
         ? System.currentTimeMillis() + 25000 : transfer.expiresAtMillis());
     if (transfer.position() != null) {

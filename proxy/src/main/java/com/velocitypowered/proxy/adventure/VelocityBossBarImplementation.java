@@ -75,6 +75,11 @@ public final class VelocityBossBarImplementation implements BossBar.Listener,
     return false;
   }
 
+  /** Removes the client bar for a reset while retaining its proxy subscription. */
+  public void removeDirect(final ConnectedPlayer viewer) {
+    viewer.getConnection().write(BossBarPacket.createRemovePacket(this.id, this.bar));
+  }
+
   public void viewerDisconnected(final ConnectedPlayer viewer) {
     this.viewers.remove(viewer);
   }

@@ -623,9 +623,8 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
       player.getTabList().clearAllSilent();
       if (player.getProtocolVersion().noLessThan(ProtocolVersion.MINECRAFT_1_20_2)) {
         player.getBossBarManager().dropPackets();
-      } else {
-        serverBossBars.clear();
       }
+      serverBossBars.clear();
     }
 
     player.switchToConfigState();
@@ -642,6 +641,18 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
    */
   public void handleBackendJoinGame(JoinGamePacket joinGame, VelocityServerConnection destination) {
     final MinecraftConnection serverMc = destination.ensureConnected();
+
+    if (destination.isDetachedConfiguration()) {
+      player.getBossBarManager().preparePlayReset();
+      // CONFIG normally clears backend boss bars. This path remains in PLAY.
+      for (UUID serverBossBar : serverBossBars) {
+        BossBarPacket removal = new BossBarPacket();
+        removal.setUuid(serverBossBar);
+        removal.setAction(BossBarPacket.REMOVE);
+        player.getConnection().delayedWrite(removal);
+      }
+      serverBossBars.clear();
+    }
 
     if (!spawned) {
       // The player wasn't spawned in yet, so we don't need to do anything special. Just send
@@ -664,6 +675,8 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
     }
 
     destination.setEntityId(joinGame.getEntityId()); // used for sound api
+    // Remember it on the player too: the connection holding it disappears if that backend dies.
+    player.setLastKnownEntityId(joinGame.getEntityId());
     if (player.getProtocolVersion().noLessThan(ProtocolVersion.MINECRAFT_1_20_2)) {
       player.getBossBarManager().sendBossBars();
     } else {

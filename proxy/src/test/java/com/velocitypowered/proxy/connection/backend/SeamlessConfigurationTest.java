@@ -42,6 +42,8 @@ import com.velocitypowered.proxy.protocol.packet.config.TagsUpdatePacket;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -76,6 +78,63 @@ class SeamlessConfigurationTest {
     } finally {
       different.release();
     }
+  }
+
+  @Test
+  void mismatchIdentifiesBothRegistryNamesAndSizesWithoutConsumingBuffers() {
+    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION);
+    capture.observe(packs());
+    capture.select(packs());
+    RegistrySyncPacket source = namedRegistry("minecraft:dimension_type");
+    RegistrySyncPacket destination = namedRegistry("minecraft:worldgen/biome");
+    try {
+      capture.observe(source);
+      capture.observe(new ActiveFeaturesPacket());
+      capture.observe(new TagsUpdatePacket());
+      capture.observe(FinishedUpdatePacket.INSTANCE);
+      SeamlessConfiguration negotiation = new SeamlessConfiguration(capture.baseline().orElseThrow(), VERSION);
+      negotiation.accept(packs());
+      String reason = assertThrows(IllegalStateException.class, () -> negotiation.accept(destination)).getMessage();
+      assertTrue(reason.contains("data packet #2"));
+      assertTrue(reason.contains("registry=minecraft:dimension_type"));
+      assertTrue(reason.contains("registry=minecraft:worldgen/biome"));
+      assertTrue(reason.contains("bytes, sha256="));
+      assertTrue(source.content().readerIndex() == 0 && destination.content().readerIndex() == 0);
+      assertTrue(source.refCnt() == 1 && destination.refCnt() == 1);
+    } finally {
+      source.release();
+      destination.release();
+    }
+  }
+
+  @Test
+  void differentClientSelectionCannotBeReportedAsIdentical() {
+    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION);
+    capture.observe(packs());
+    KnownPacksPacket reply = new KnownPacksPacket();
+    ByteBuf encoded = Unpooled.buffer();
+    try {
+      ProtocolUtils.writeVarInt(encoded, 1);
+      ProtocolUtils.writeString(encoded, "minecraft");
+      ProtocolUtils.writeString(encoded, "core");
+      ProtocolUtils.writeString(encoded, "26.2");
+      reply.decode(encoded, ProtocolUtils.Direction.SERVERBOUND, VERSION);
+      capture.select(reply);
+    } finally {
+      encoded.release();
+    }
+    RegistrySyncPacket packet = registry(1);
+    try {
+      capture.observe(packet);
+    } finally {
+      packet.release();
+    }
+    capture.observe(new ActiveFeaturesPacket());
+    capture.observe(new TagsUpdatePacket());
+    capture.observe(FinishedUpdatePacket.INSTANCE);
+    SeamlessConfiguration negotiation = new SeamlessConfiguration(baseline(), VERSION);
+    assertTrue(negotiation.matchesSelection(baseline()));
+    assertFalse(negotiation.matchesSelection(capture.baseline().orElseThrow()));
   }
 
   @Test
@@ -246,7 +305,11 @@ class SeamlessConfigurationTest {
     }
   }
 
-  private static SeamlessConfiguration.Baseline baseline() {
+  static SeamlessConfiguration.Baseline baseline() {
+    return baseline(new TagsUpdatePacket());
+  }
+
+  private static SeamlessConfiguration.Baseline baseline(TagsUpdatePacket tags) {
     SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION);
     capture.observe(packs());
     capture.select(packs());
@@ -257,12 +320,16 @@ class SeamlessConfigurationTest {
       packet.release();
     }
     capture.observe(new ActiveFeaturesPacket());
-    capture.observe(new TagsUpdatePacket());
+    capture.observe(tags);
     capture.observe(FinishedUpdatePacket.INSTANCE);
     return capture.baseline().orElseThrow();
   }
 
   private static void feed(SeamlessConfiguration negotiation) {
+    feed(negotiation, new TagsUpdatePacket());
+  }
+
+  private static void feed(SeamlessConfiguration negotiation, TagsUpdatePacket tags) {
     RegistrySyncPacket packet = registry(1);
     try {
       negotiation.accept(packet);
@@ -270,10 +337,62 @@ class SeamlessConfigurationTest {
       packet.release();
     }
     negotiation.accept(new ActiveFeaturesPacket());
-    negotiation.accept(new TagsUpdatePacket());
+    negotiation.accept(tags);
   }
 
-  private static KnownPacksPacket packs() {
+  @Test
+  void tagMapOrderingMatchesWithoutMutatingTheWirePacket() {
+    Map<String, int[]> firstTags = new LinkedHashMap<>();
+    firstTags.put("minecraft:first", new int[] {3, 1, 3});
+    firstTags.put("minecraft:empty", new int[0]);
+    Map<String, int[]> reversedTags = new LinkedHashMap<>();
+    reversedTags.put("minecraft:empty", new int[0]);
+    reversedTags.put("minecraft:first", new int[] {3, 1, 3});
+    Map<String, Map<String, int[]>> first = new LinkedHashMap<>();
+    first.put("minecraft:block", firstTags);
+    first.put("minecraft:item", Map.of());
+    Map<String, Map<String, int[]>> reversed = new LinkedHashMap<>();
+    reversed.put("minecraft:item", Map.of());
+    reversed.put("minecraft:block", reversedTags);
+    TagsUpdatePacket source = new TagsUpdatePacket(first);
+    TagsUpdatePacket destination = new TagsUpdatePacket(reversed);
+    byte[] original = SeamlessConfiguration.encode(destination, ProtocolUtils.Direction.CLIENTBOUND);
+    assertFalse(java.util.Arrays.equals(original,
+        SeamlessConfiguration.encode(source, ProtocolUtils.Direction.CLIENTBOUND)));
+    SeamlessConfiguration negotiation = new SeamlessConfiguration(baseline(source), VERSION);
+    negotiation.accept(packs());
+    feed(negotiation, destination);
+    negotiation.accept(FinishedUpdatePacket.INSTANCE);
+    assertTrue(negotiation.complete());
+    assertTrue(negotiation.reorderedTags());
+    assertArrayEquals(original, SeamlessConfiguration.encode(destination, ProtocolUtils.Direction.CLIENTBOUND));
+  }
+
+  @Test
+  void canonicalTagsStillRejectChangedIdsOrderMultiplicityNamesAndMissingTags() {
+    TagsUpdatePacket source = new TagsUpdatePacket(Map.of("minecraft:block",
+        Map.of("minecraft:test", new int[] {1, 2, 1}, "minecraft:empty", new int[0])));
+    List<TagsUpdatePacket> changes = List.of(
+        new TagsUpdatePacket(Map.of("minecraft:block",
+            Map.of("minecraft:test", new int[] {1, 3, 1}, "minecraft:empty", new int[0]))),
+        new TagsUpdatePacket(Map.of("minecraft:block",
+            Map.of("minecraft:test", new int[] {2, 1, 1}, "minecraft:empty", new int[0]))),
+        new TagsUpdatePacket(Map.of("minecraft:block",
+            Map.of("minecraft:test", new int[] {1, 2}, "minecraft:empty", new int[0]))),
+        new TagsUpdatePacket(Map.of("minecraft:block",
+            Map.of("minecraft:other", new int[] {1, 2, 1}, "minecraft:empty", new int[0]))),
+        new TagsUpdatePacket(Map.of("minecraft:item",
+            Map.of("minecraft:test", new int[] {1, 2, 1}, "minecraft:empty", new int[0]))),
+        new TagsUpdatePacket(Map.of("minecraft:block", Map.of("minecraft:test", new int[] {1, 2, 1}))));
+    for (TagsUpdatePacket changed : changes) {
+      SeamlessConfiguration negotiation = new SeamlessConfiguration(baseline(source), VERSION);
+      negotiation.accept(packs());
+      assertThrows(IllegalStateException.class, () -> feed(negotiation, changed));
+      assertFalse(negotiation.complete());
+    }
+  }
+
+  static KnownPacksPacket packs() {
     KnownPacksPacket packet = new KnownPacksPacket();
     ByteBuf bytes = Unpooled.wrappedBuffer(new byte[] {0});
     try {
@@ -288,6 +407,19 @@ class SeamlessConfigurationTest {
     RegistrySyncPacket packet = new RegistrySyncPacket();
     ByteBuf bytes = Unpooled.wrappedBuffer(new byte[] {(byte) value});
     try {
+      packet.decode(bytes, ProtocolUtils.Direction.CLIENTBOUND, VERSION);
+      return packet;
+    } finally {
+      bytes.release();
+    }
+  }
+
+  private static RegistrySyncPacket namedRegistry(String name) {
+    RegistrySyncPacket packet = new RegistrySyncPacket();
+    ByteBuf bytes = Unpooled.buffer();
+    try {
+      ProtocolUtils.writeString(bytes, name);
+      ProtocolUtils.writeVarInt(bytes, 0);
       packet.decode(bytes, ProtocolUtils.Direction.CLIENTBOUND, VERSION);
       return packet;
     } finally {

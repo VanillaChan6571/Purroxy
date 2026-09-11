@@ -79,6 +79,36 @@ class HandoffCoordinatorTest {
   }
 
   @Test
+  void restartReconcilesUncommittedFenceWithoutWaitingForPlayerLogin() throws Exception {
+    HandoffStore journal = new HandoffStore(directory);
+    HandoffStore.Transfer transfer = journal.begin(player, "hub-1", "hub-2", System.currentTimeMillis() + 25000);
+    HubPosition position = new HubPosition("hub", "v1", 12, 80, -4, 90, 0, 0, 0, 0);
+    journal.update(transfer.withPosition(position));
+    FakeBackends backends = new FakeBackends();
+    for (String backend : List.of("hub-1", "hub-2")) {
+      JsonObject entry = new JsonObject();
+      entry.addProperty("transfer", transfer.id().toString());
+      entry.addProperty("player", player.toString());
+      entry.addProperty("generation", transfer.generation());
+      entry.addProperty("source", "hub-1");
+      entry.addProperty("destination", "hub-2");
+      entry.addProperty("role", backend.equals("hub-1") ? "SOURCE" : "DESTINATION");
+      entry.addProperty("phase", backend.equals("hub-1") ? "FENCED" : "STAGED");
+      entry.add("snapshot", new Gson().toJsonTree(position));
+      backends.entries.put(backend, entry);
+    }
+    try (HandoffCoordinator restarted = new HandoffCoordinator(directory, backends)) {
+      restarted.recoverAborts().get(5, TimeUnit.SECONDS);
+      assertEquals("ABORTED", backends.phase("hub-1"));
+      assertEquals("ABORTED", backends.phase("hub-2"));
+      assertFalse(restarted.requiresRecovery(player));
+      int mutations = backends.mutations.size();
+      restarted.recoverAborts().get(5, TimeUnit.SECONDS);
+      assertEquals(mutations, backends.mutations.size());
+    }
+  }
+
+  @Test
   void failedDestinationConnectionKeepsSourceFencedAndDoesNotScheduleRelease() throws Exception {
     FakeBackends backends = new FakeBackends();
     try (HandoffCoordinator coordinator = new HandoffCoordinator(directory, backends)) {
@@ -86,6 +116,7 @@ class HandoffCoordinatorTest {
           .get(5, TimeUnit.SECONDS);
       coordinator.finish(ticket, false).get(5, TimeUnit.SECONDS);
       coordinator.retryReleases().get(5, TimeUnit.SECONDS);
+      coordinator.recoverAborts().get(5, TimeUnit.SECONDS);
       assertEquals("FENCED", backends.phase("hub-1"));
       assertTrue(coordinator.requiresRecovery(player));
       assertFalse(backends.mutations.contains("hub-1:release"));

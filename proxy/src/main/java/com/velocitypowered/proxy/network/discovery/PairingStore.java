@@ -43,11 +43,26 @@ import javax.net.ssl.KeyManagerFactory;
 
 /** Durable reusable challenge enrollment and per-instance credentials for automatically provisioned TLS. */
 public final class PairingStore {
-  private record Entry(String name, String host, int port, String group, String credential, String enrollmentHash) {}
+  // entityIdBase is allocated once per backend and never reused, so ids minted on one backend can
+  // never collide with another's. Zero means an enrollment predating this field.
+  private record Entry(String name, String host, int port, String group, String credential,
+                       String enrollmentHash, int entityIdBase) {
+    Entry(String name, String host, int port, String group, String credential, String enrollmentHash) {
+      this(name, host, port, group, credential, enrollmentHash, 0);
+    }
+  }
+
+  /**
+   * Player entity id blocks. Backends allocate players from their own block while vanilla's counter
+   * keeps serving world entities from the low ids, so the two can never meet: an entity counter would
+   * need nearly two billion allocations to reach the first block.
+   */
+  static final int PLAYER_ID_BASE = 1_900_000_000;
+  static final int PLAYER_ID_SPACING = 10_000_000;
 
   private record State(String token, Map<UUID, Entry> entries) {}
 
-  record Registration(BackendResume resume, String credential) {}
+  record Registration(BackendResume resume, String credential, int entityIdBase) {}
 
   /** Name of the shared secret administrators copy into each backend's server directory. */
   public static final String CHALLENGE_FILE = "purroxy.challenge";
@@ -107,7 +122,8 @@ public final class PairingStore {
       Entry entry = enrollment.getValue();
       if (entry.name().equals(name) && !entry.enrollmentHash().isEmpty()) {
         Map<UUID, Entry> entries = new HashMap<>(state.entries());
-        entries.put(enrollment.getKey(), new Entry(entry.name(), entry.host(), entry.port(), entry.group(), entry.credential(), ""));
+        entries.put(enrollment.getKey(), new Entry(entry.name(), entry.host(), entry.port(), entry.group(),
+            entry.credential(), "", entry.entityIdBase()));
         State next = new State(state.token(), Map.copyOf(entries));
         save(next);
         state = next;
@@ -139,7 +155,7 @@ public final class PairingStore {
       if (!existing.host().equals(resume.host()) || existing.port() != resume.port() || !existing.group().equals(resume.group())) {
         throw new IllegalArgumentException("Paired endpoint or group changed; re-enrollment is required");
       }
-      return new Registration(resume, existing.credential());
+      return new Registration(resume, existing.credential(), existing.entityIdBase());
     }
     if (state.entries().size() >= 1024 || !auth.has("token") || !equal(state.token(), auth.get("token").getAsString())) {
       throw new IllegalArgumentException("Backend challenge is invalid or revoked");
@@ -165,13 +181,20 @@ public final class PairingStore {
     }
     raw.addProperty("serverId", name);
     BackendResume resume = GSON.fromJson(raw, BackendResume.class);
-    Entry added = new Entry(name, resume.host(), resume.port(), resume.group(), secret(), hash(state.token()));
+    // Allocate a block above every block handed out so far, so two backends can never mint the same id.
+    int highest = state.entries().values().stream().mapToInt(Entry::entityIdBase).max().orElse(0);
+    int entityIdBase = Math.max(highest, PLAYER_ID_BASE - PLAYER_ID_SPACING) + PLAYER_ID_SPACING;
+    if (entityIdBase > Integer.MAX_VALUE - PLAYER_ID_SPACING) {
+      throw new IllegalStateException("No player entity id block is left to allocate");
+    }
+    Entry added = new Entry(name, resume.host(), resume.port(), resume.group(), secret(),
+        hash(state.token()), entityIdBase);
     Map<UUID, Entry> entries = new HashMap<>(state.entries());
     entries.put(instance, added);
     State next = new State(state.token(), Map.copyOf(entries)); // The challenge stays valid until it is revoked.
     save(next); // Do not acknowledge credentials until their assignment survives restart.
     state = next;
-    return new Registration(resume, added.credential());
+    return new Registration(resume, added.credential(), added.entityIdBase());
   }
 
   private void publishChallenge() throws IOException {

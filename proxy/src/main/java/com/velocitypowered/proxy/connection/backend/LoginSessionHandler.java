@@ -47,6 +47,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
 import org.apache.logging.log4j.LogManager;
@@ -58,6 +59,8 @@ import org.apache.logging.log4j.Logger;
 public class LoginSessionHandler implements MinecraftSessionHandler {
 
   private static final Logger logger = LogManager.getLogger(LoginSessionHandler.class);
+  private static final AtomicBoolean VIA_INSPECTION_WARNING = new AtomicBoolean();
+  private static final AtomicBoolean SEAMLESS_APPROVAL_WARNING = new AtomicBoolean();
 
   private static final Component MODERN_IP_FORWARDING_FAILURE =
       Component.translatable("velocity.error.modern-forwarding-failed");
@@ -206,7 +209,7 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
     VelocityServerConnection source = player.getConnectedServer();
     SeamlessConfiguration.Baseline baseline = player.seamlessBaseline();
     if (serverConn.detachedAttempted || source == null || !source.isActive() || baseline == null
-        || player.getProtocolVersion() != ProtocolVersion.MINECRAFT_26_2
+        || !isNative26_2(player)
         || backend.getProtocolVersion() != ProtocolVersion.MINECRAFT_26_2
         || player.getConnection().getType() != com.velocitypowered.proxy.connection.ConnectionTypes.VANILLA
         || !(player.getConnection().getActiveSessionHandler() instanceof ClientPlaySessionHandler)
@@ -226,7 +229,9 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
     });
     negotiation.whenComplete((ignored, failure) -> {
       if (failure == null) {
-        logger.info("Detached configuration: {} negotiated with the client remaining in PLAY; using the reset join path.",
+        // Whether the client is reset is not known yet: it depends on the entity id the
+        // destination sends in JoinGame. ClientPlaySessionHandler logs the outcome.
+        logger.info("Detached configuration: {} negotiated with the client remaining in PLAY.",
             serverConn.getServerInfo().getName());
         return;
       }
@@ -237,22 +242,46 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
         serverConn.detachedConfiguration = false;
         serverConn.detachedSource = null;
         if (!player.isActive() || player.getConnectionInFlight() != serverConn || resultFuture.isDone()) {
+          logger.info("Detached configuration: {} cannot fall back to normal configuration ({}).",
+              serverConn.getServerInfo().getName(), failure.getMessage());
           resultFuture.completeExceptionally(failure);
           return;
         }
-        logger.info("Detached configuration: {} fell back to normal configuration ({}).",
-            serverConn.getServerInfo().getName(), failure.getMessage());
-        try {
-          serverConn.connect().whenComplete((result, retryFailure) -> {
-            if (retryFailure != null) {
-              resultFuture.completeExceptionally(retryFailure);
-            } else {
-              resultFuture.complete(result);
-            }
-          });
-        } catch (RuntimeException retryFailure) {
-          resultFuture.completeExceptionally(retryFailure);
-        }
+        // The backend normally suppresses its arrival teleport for a seamless candidate. Persistently
+        // turn that off before reconnecting through visible CONFIG, otherwise the fallback could reset
+        // the client without ever synchronizing its destination position.
+        server.getDiscovery().requireVisibleArrival(player.getUniqueId(), serverConn.getServerInfo().getName())
+            .whenCompleteAsync((marked, markFailure) -> {
+              // The mark is only load-bearing once a suppression was actually approved. Without one
+              // the destination still sends its ordinary arrival sync, so failing to mark it must not
+              // cost the player a committed transfer: the probe is the optimization, this is the switch.
+              if (markFailure != null
+                  && server.getDiscovery().seamlessArrivalApproved(player.getUniqueId())) {
+                logger.error("Detached configuration: {} approved a seamless arrival and could not be"
+                    + " returned to a visible one; the transfer has to be recovered.",
+                    serverConn.getServerInfo().getName(), markFailure);
+                resultFuture.completeExceptionally(markFailure);
+                return;
+              }
+              if (markFailure != null) {
+                logger.warn("Detached configuration: {} could not be marked for a visible arrival;"
+                    + " falling back anyway, since its arrival sync was never suppressed.",
+                    serverConn.getServerInfo().getName(), markFailure);
+              }
+              logger.info("Detached configuration: {} fell back to normal configuration ({}).",
+                  serverConn.getServerInfo().getName(), failure.getMessage());
+              try {
+                serverConn.connect().whenComplete((result, retryFailure) -> {
+                  if (retryFailure != null) {
+                    resultFuture.completeExceptionally(retryFailure);
+                  } else {
+                    resultFuture.complete(result);
+                  }
+                });
+              } catch (RuntimeException retryFailure) {
+                resultFuture.completeExceptionally(retryFailure);
+              }
+            }, player.getConnection().eventLoop());
       });
     });
     backend.write(new LoginAcknowledgedPacket());
@@ -261,11 +290,55 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
         () -> !resultFuture.isDone() && player.isActive() && source.isActive()
             && player.getConnectionInFlight() == serverConn && player.getConnectedServer() == source
             && player.seamlessBaseline() == baseline
-            && player.getConnection().getActiveSessionHandler() instanceof ClientPlaySessionHandler));
+            && player.getConnection().getActiveSessionHandler() instanceof ClientPlaySessionHandler,
+        () -> approveSeamlessArrival(player, serverConn)));
     if (player.getClientSettingsPacket() != null) {
       backend.write(player.getClientSettingsPacket());
     }
     return true;
+  }
+
+  private boolean isNative26_2(ConnectedPlayer player) {
+    if (player.getProtocolVersion() != ProtocolVersion.MINECRAFT_26_2) {
+      return false;
+    }
+    // Unit-test server doubles do not install a plugin manager. A real VelocityServer always does.
+    if (server.getPluginManager() == null
+        || server.getPluginManager().getPlugin("viaversion").isEmpty()) {
+      return true;
+    }
+    try {
+      Class<?> via = Class.forName("com.viaversion.viaversion.api.Via", false,
+          server.getPluginManager().getPlugin("viaversion").orElseThrow().getInstance()
+              .orElseThrow().getClass().getClassLoader());
+      Object api = via.getMethod("getAPI").invoke(null);
+      Object original = api.getClass().getMethod("getPlayerVersion", java.util.UUID.class)
+          .invoke(api, player.getUniqueId());
+      return original instanceof Number number
+          && number.intValue() == ProtocolVersion.MINECRAFT_26_2.getProtocol();
+    } catch (ReflectiveOperationException | RuntimeException failure) {
+      if (VIA_INSPECTION_WARNING.compareAndSet(false, true)) {
+        logger.warn("Seamless transfers are disabled while ViaVersion's original client protocol "
+            + "cannot be verified.", failure);
+      }
+      return false;
+    }
+  }
+
+  private CompletableFuture<Void> approveSeamlessArrival(ConnectedPlayer player,
+      VelocityServerConnection destination) {
+    return server.getDiscovery().approveSeamlessArrival(
+        player.getUniqueId(), destination.getServerInfo().getName()).handle((ignored, failure) -> {
+          if (failure != null && SEAMLESS_APPROVAL_WARNING.compareAndSet(false, true)) {
+            logger.warn("The destination did not acknowledge seamless-arrival approval. Continuing"
+                + " through the backward-compatible path; deploy the matching Nekopur build to"
+                + " enable durable arrival-sync coordination.", failure);
+          }
+          // This signal hardens coordination with a matching Nekopur, but seamless-preferred must
+          // remain compatible with older peers. A rejected extension must never fail a transfer
+          // after ownership has already committed.
+          return null;
+        });
   }
 
   @Override

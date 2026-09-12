@@ -33,6 +33,7 @@ import com.velocitypowered.proxy.connection.MinecraftConnection;
 import com.velocitypowered.proxy.connection.MinecraftSessionHandler;
 import com.velocitypowered.proxy.protocol.ProtocolUtils;
 import com.velocitypowered.proxy.protocol.StateRegistry;
+import com.velocitypowered.proxy.protocol.packet.JoinGamePacket;
 import com.velocitypowered.proxy.protocol.packet.PluginMessagePacket;
 import com.velocitypowered.proxy.protocol.packet.config.ActiveFeaturesPacket;
 import com.velocitypowered.proxy.protocol.packet.config.FinishedUpdatePacket;
@@ -138,6 +139,14 @@ class SeamlessConfigurationTest {
   }
 
   @Test
+  void joinStateIgnoresOnlyTheNegotiatedEntityId() {
+    SeamlessConfiguration.JoinBaseline baseline = SeamlessConfiguration.captureJoin(join(41, 0, 0), VERSION);
+    assertTrue(baseline.matches(join(42, 0, 0), VERSION));
+    assertFalse(baseline.matches(join(42, 1, 0), VERSION));
+    assertFalse(baseline.matches(join(42, 0, 1), VERSION));
+  }
+
+  @Test
   void tagsDifferenceAndEarlyFinishAreRejected() {
     SeamlessConfiguration negotiation = new SeamlessConfiguration(baseline(), VERSION);
     assertThrows(IllegalStateException.class, () -> negotiation.accept(FinishedUpdatePacket.INSTANCE));
@@ -203,6 +212,41 @@ class SeamlessConfigurationTest {
     order.verify(backend).write(FinishedUpdatePacket.INSTANCE);
     order.verify(backend).setActiveSessionHandler(StateRegistry.PLAY, next);
     verify(backend, never()).close();
+  }
+
+  @Test
+  void handlerDoesNotAcknowledgeFinishBeforeArrivalApproval() {
+    MinecraftConnection backend = mock(MinecraftConnection.class);
+    when(backend.getProtocolVersion()).thenReturn(VERSION);
+    EmbeddedChannel channel = new EmbeddedChannel();
+    when(backend.eventLoop()).thenReturn(channel.eventLoop());
+    MinecraftSessionHandler next = mock(MinecraftSessionHandler.class);
+    CompletableFuture<Void> result = new CompletableFuture<>();
+    CompletableFuture<Void> approval = new CompletableFuture<>();
+    SeamlessConfigSessionHandler handler = new SeamlessConfigSessionHandler(backend, next,
+        baseline(), result, () -> true, () -> approval);
+    try {
+      handler.handleGeneric(packs());
+      RegistrySyncPacket registry = registry(1);
+      try {
+        handler.handleGeneric(registry);
+      } finally {
+        registry.release();
+      }
+      handler.handleGeneric(new ActiveFeaturesPacket());
+      handler.handleGeneric(new TagsUpdatePacket());
+      handler.handleGeneric(FinishedUpdatePacket.INSTANCE);
+      verify(backend, never()).write(FinishedUpdatePacket.INSTANCE);
+      verify(backend, never()).setActiveSessionHandler(any(StateRegistry.class), any(MinecraftSessionHandler.class));
+
+      approval.complete(null);
+      channel.runPendingTasks();
+      verify(backend).write(FinishedUpdatePacket.INSTANCE);
+      verify(backend).setActiveSessionHandler(StateRegistry.PLAY, next);
+      assertTrue(result.isDone() && !result.isCompletedExceptionally());
+    } finally {
+      channel.finishAndReleaseAll();
+    }
   }
 
   @Test
@@ -420,6 +464,38 @@ class SeamlessConfigurationTest {
     try {
       ProtocolUtils.writeString(bytes, name);
       ProtocolUtils.writeVarInt(bytes, 0);
+      packet.decode(bytes, ProtocolUtils.Direction.CLIENTBOUND, VERSION);
+      return packet;
+    } finally {
+      bytes.release();
+    }
+  }
+
+  private static JoinGamePacket join(int entityId, int dimension, int gamemode) {
+    JoinGamePacket packet = new JoinGamePacket();
+    ByteBuf bytes = Unpooled.buffer();
+    try {
+      bytes.writeInt(entityId);
+      bytes.writeBoolean(false); // hardcore
+      ProtocolUtils.writeStringArray(bytes, new String[] {"minecraft:overworld"});
+      ProtocolUtils.writeVarInt(bytes, 100); // max players
+      ProtocolUtils.writeVarInt(bytes, 12); // view distance
+      ProtocolUtils.writeVarInt(bytes, 8); // simulation distance
+      bytes.writeBoolean(false); // reduced debug info
+      bytes.writeBoolean(true); // show respawn screen
+      bytes.writeBoolean(false); // limited crafting
+      ProtocolUtils.writeVarInt(bytes, dimension);
+      ProtocolUtils.writeString(bytes, "minecraft:overworld");
+      bytes.writeLong(1234L);
+      bytes.writeByte(gamemode);
+      bytes.writeByte(-1);
+      bytes.writeBoolean(false); // debug world
+      bytes.writeBoolean(false); // flat world
+      bytes.writeBoolean(false); // last death position
+      ProtocolUtils.writeVarInt(bytes, 0); // portal cooldown
+      ProtocolUtils.writeVarInt(bytes, 63); // sea level
+      bytes.writeBoolean(true); // online mode
+      bytes.writeBoolean(true); // enforce secure chat
       packet.decode(bytes, ProtocolUtils.Direction.CLIENTBOUND, VERSION);
       return packet;
     } finally {

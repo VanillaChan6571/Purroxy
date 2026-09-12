@@ -59,10 +59,14 @@ public final class HandoffCoordinator implements AutoCloseable {
   private final java.util.Map<UUID, Integer> requestedEntityIds = new ConcurrentHashMap<>();
   // What the destination actually reserved. Equal to the requested id means the client can keep it.
   private final java.util.Map<UUID, Integer> reservedEntityIds = new ConcurrentHashMap<>();
-  // Entities the source had shown this client. The proxy clears them rather than the source, so a
-  // source that dies after fencing cannot leave the client holding entities nothing will remove.
+  // Entities the source had shown this client, as reported on the fence reply. The proxy removes
+  // them from the client itself, so a source that dies between fencing and the switch cannot leave
+  // the client holding entities nothing will ever clear.
   private final java.util.Map<UUID, int[]> sourceEntities = new ConcurrentHashMap<>();
   private final java.util.Map<UUID, Ticket> pendingReleases = new ConcurrentHashMap<>();
+  // Transfers whose destination was told to suppress its arrival sync. Only these make the
+  // matching visible-arrival mark load-bearing on a fallback.
+  private final java.util.Map<UUID, UUID> seamlessApprovals = new ConcurrentHashMap<>();
   private final ExecutorService io = Executors.newSingleThreadExecutor(task -> {
     Thread thread = new Thread(task, "purroxy-handoff-journal");
     thread.setDaemon(true);
@@ -88,7 +92,7 @@ public final class HandoffCoordinator implements AutoCloseable {
         || transfer.phase() == HandoffStore.Phase.ABORTED && !rolledBackSources.contains(transfer.id()));
   }
 
-  /** Entities the source had shown this client, to be removed before the destination populates. */
+  /** Entities the source had shown this client, for the proxy to remove before the switch. */
   public int[] sourceEntities(UUID player) {
     return sourceEntities.getOrDefault(player, new int[0]);
   }
@@ -96,6 +100,73 @@ public final class HandoffCoordinator implements AutoCloseable {
   /** The entity id the destination reserved for this player, or 0 when none was negotiated. */
   public int reservedEntityId(UUID player) {
     return reservedEntityIds.getOrDefault(player, 0);
+  }
+
+  /** Whether this player's committed transfer already had its arrival sync suppressed. */
+  public boolean seamlessArrivalApproved(UUID player) {
+    HandoffStore.Transfer transfer = store.get(player);
+    return transfer != null && transfer.id().equals(seamlessApprovals.get(player));
+  }
+
+  /** Whether staging retained the exact entity id the connected client already holds. */
+  public boolean canRetainEntityId(UUID player) {
+    int requested = requestedEntityIds.getOrDefault(player, 0);
+    return requested > 0 && reservedEntityIds.getOrDefault(player, 0) == requested;
+  }
+
+  /** Whether a backend advertises the arrival-control operations this proxy would send it. */
+  public boolean supportsArrivalControl(String backend) {
+    return transport.current(backend).filter(peer -> peer.capabilities().seamless()).isPresent();
+  }
+
+  /** Approves arrival-sync suppression only after detached CONFIG has matched. */
+  public CompletableFuture<Void> approveSeamlessArrival(UUID player, String destination) {
+    if (!supportsArrivalControl(destination)) {
+      return CompletableFuture.failedFuture(new IllegalStateException(
+          "Destination does not advertise seamless arrival control"));
+    }
+    HandoffStore.Transfer transfer = store.get(player);
+    if (transfer == null || transfer.phase() != HandoffStore.Phase.COMMITTED
+        || !transfer.destination().equals(destination) || !canRetainEntityId(player)) {
+      return CompletableFuture.failedFuture(new IllegalStateException(
+          "Seamless arrival does not match a committed entity-id reservation"));
+    }
+    Peer peer = transport.current(destination).orElse(null);
+    if (peer == null) {
+      return CompletableFuture.failedFuture(new IllegalStateException(
+          "Seamless arrival awaits the committed destination"));
+    }
+    return call(peer, transfer, "seamless").thenApply(reply -> {
+      expect(reply, transfer, "DESTINATION", "COMMITTED", "ACTIVATED");
+      seamlessApprovals.put(player, transfer.id());
+      return null;
+    });
+  }
+
+  /** Makes a committed destination use its ordinary arrival position sync before a visible retry. */
+  public CompletableFuture<Void> requireVisibleArrival(UUID player, String destination) {
+    if (!supportsArrivalControl(destination)) {
+      // Such a backend was never asked to suppress anything, because this proxy refuses the
+      // detached path against it. There is no mark to undo, so demanding one would fail a
+      // transfer over an operation the destination does not even implement.
+      return CompletableFuture.completedFuture(null);
+    }
+    HandoffStore.Transfer transfer = store.get(player);
+    if (transfer == null || transfer.phase() != HandoffStore.Phase.COMMITTED
+        || !transfer.destination().equals(destination)) {
+      return CompletableFuture.failedFuture(new IllegalStateException(
+          "Visible arrival does not match a committed destination"));
+    }
+    Peer peer = transport.current(destination).orElse(null);
+    if (peer == null) {
+      return CompletableFuture.failedFuture(new IllegalStateException(
+          "Visible arrival awaits the committed destination"));
+    }
+    return call(peer, transfer, "visible").thenApply(reply -> {
+      expect(reply, transfer, "DESTINATION", "COMMITTED", "ACTIVATED");
+      seamlessApprovals.remove(player, transfer.id());
+      return null;
+    });
   }
 
   /** Executes export, stage, source fence, durable commit, then destination commit. */
@@ -295,6 +366,7 @@ public final class HandoffCoordinator implements AutoCloseable {
   public CompletableFuture<Void> finish(Ticket ticket, boolean connected) {
     requestedEntityIds.remove(ticket.player()); // The request belongs to this transfer only.
     reservedEntityIds.remove(ticket.player());
+    seamlessApprovals.remove(ticket.player(), ticket.transfer());
     sourceEntities.remove(ticket.player());
     HandoffStore.Transfer transfer = store.get(ticket.player());
     if (transfer == null || !transfer.id().equals(ticket.transfer())

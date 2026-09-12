@@ -20,6 +20,7 @@ package com.velocitypowered.proxy.connection.backend;
 import com.velocitypowered.api.network.ProtocolVersion;
 import com.velocitypowered.proxy.protocol.MinecraftPacket;
 import com.velocitypowered.proxy.protocol.ProtocolUtils;
+import com.velocitypowered.proxy.protocol.packet.JoinGamePacket;
 import com.velocitypowered.proxy.protocol.packet.KeepAlivePacket;
 import com.velocitypowered.proxy.protocol.packet.PingIdentifyPacket;
 import com.velocitypowered.proxy.protocol.packet.config.ActiveFeaturesPacket;
@@ -62,6 +63,24 @@ public final class SeamlessConfiguration {
       this.packets = List.copyOf(packets);
       this.knownPacksReply = reply.clone();
     }
+  }
+
+  /** Client-significant JoinGame state, excluding only the player entity id. */
+  public static final class JoinBaseline {
+    private final byte[] digest;
+
+    private JoinBaseline(byte[] digest) {
+      this.digest = digest;
+    }
+
+    public boolean matches(JoinGamePacket packet, ProtocolVersion version) {
+      return MessageDigest.isEqual(digest, joinDigest(packet, version));
+    }
+  }
+
+  /** Captures the PLAY state that must remain unchanged when JoinGame and Respawn are suppressed. */
+  public static JoinBaseline captureJoin(JoinGamePacket packet, ProtocolVersion version) {
+    return new JoinBaseline(joinDigest(packet, version));
   }
 
   /** Records only supported exchanges; an unsupported exchange invalidates the entire capture. */
@@ -292,6 +311,30 @@ public final class SeamlessConfiguration {
     try {
       packet.encode(buffer, direction, ProtocolVersion.MINECRAFT_26_2);
       return ByteBufUtil.getBytes(buffer);
+    } finally {
+      buffer.release();
+    }
+  }
+
+  private static byte[] joinDigest(JoinGamePacket packet, ProtocolVersion version) {
+    if (version != ProtocolVersion.MINECRAFT_26_2) {
+      throw new IllegalArgumentException("Seamless JoinGame comparison requires native 26.2");
+    }
+    ByteBuf buffer = Unpooled.buffer(256, MAX_BYTES);
+    try {
+      packet.encode(buffer, ProtocolUtils.Direction.CLIENTBOUND, version);
+      if (buffer.readableBytes() < Integer.BYTES) {
+        throw new IllegalStateException("JoinGame packet omitted its entity id");
+      }
+      // The first field is the entity id, negotiated separately by the handoff protocol. Everything
+      // else must remain byte-identical because the client will not receive this destination packet.
+      byte[] state = ByteBufUtil.getBytes(buffer, buffer.readerIndex() + Integer.BYTES,
+          buffer.readableBytes() - Integer.BYTES, false);
+      try {
+        return MessageDigest.getInstance("SHA-256").digest(state);
+      } catch (NoSuchAlgorithmException impossible) {
+        throw new AssertionError(impossible);
+      }
     } finally {
       buffer.release();
     }

@@ -61,6 +61,7 @@ class DetachedLoginTest {
   private final MinecraftConnection backend = mock(MinecraftConnection.class);
   private final MinecraftConnection client = mock(MinecraftConnection.class);
   private final ClientPlaySessionHandler play = mock(ClientPlaySessionHandler.class);
+  private final DiscoveryService discovery = mock(DiscoveryService.class);
   private final EmbeddedChannel channel = new EmbeddedChannel();
   private final CompletableFuture<ConnectionRequestResults.Impl> result = new CompletableFuture<>();
   private LoginSessionHandler login;
@@ -70,11 +71,14 @@ class DetachedLoginTest {
     VelocityConfiguration config = mock(VelocityConfiguration.class);
     when(server.getConfiguration()).thenReturn(config);
     when(config.getPlayerInfoForwardingMode()).thenReturn(PlayerInfoForwarding.NONE);
-    DiscoveryService discovery = mock(DiscoveryService.class);
     when(server.getDiscovery()).thenReturn(discovery);
     UUID id = UUID.randomUUID();
     when(player.getUniqueId()).thenReturn(id);
     when(discovery.allowsDetachedConfiguration(id, "hub-1", "hub-2")).thenReturn(true);
+    when(discovery.requireVisibleArrival(id, "hub-2"))
+        .thenReturn(CompletableFuture.completedFuture(null));
+    when(discovery.approveSeamlessArrival(id, "hub-2"))
+        .thenReturn(CompletableFuture.completedFuture(null));
     when(source.getServerInfo()).thenReturn(new ServerInfo("hub-1", new InetSocketAddress("127.0.0.1", 25566)));
     when(target.getServerInfo()).thenReturn(new ServerInfo("hub-2", new InetSocketAddress("127.0.0.1", 25567)));
     when(source.isActive()).thenReturn(true);
@@ -83,6 +87,7 @@ class DetachedLoginTest {
     when(player.getConnectionInFlight()).thenReturn(target);
     when(player.getConnection()).thenReturn(client);
     when(client.getType()).thenReturn(ConnectionTypes.VANILLA);
+    when(client.eventLoop()).thenReturn(channel.eventLoop());
     when(client.getActiveSessionHandler()).thenReturn(play);
     when(player.seamlessBaseline()).thenReturn(SeamlessConfigurationTest.baseline());
     when(player.getProtocolVersion()).thenReturn(ProtocolVersion.MINECRAFT_26_2);
@@ -145,6 +150,31 @@ class DetachedLoginTest {
   }
 
   @Test
+  void unsupportedSeamlessApprovalDoesNotFailCommittedPreferredTransfer() {
+    when(discovery.approveSeamlessArrival(player.getUniqueId(), "hub-2"))
+        .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("unknown action")));
+    MinecraftSessionHandler handler = start();
+    handler.handleGeneric(SeamlessConfigurationTest.packs());
+    com.velocitypowered.proxy.protocol.packet.config.RegistrySyncPacket registry =
+        new com.velocitypowered.proxy.protocol.packet.config.RegistrySyncPacket();
+    ByteBuf encoded = Unpooled.buffer().writeByte(1);
+    try {
+      registry.decode(encoded, com.velocitypowered.proxy.protocol.ProtocolUtils.Direction.CLIENTBOUND,
+          ProtocolVersion.MINECRAFT_26_2);
+      handler.handleGeneric(registry);
+    } finally {
+      registry.release();
+      encoded.release();
+    }
+    handler.handleGeneric(new com.velocitypowered.proxy.protocol.packet.config.ActiveFeaturesPacket());
+    handler.handleGeneric(new com.velocitypowered.proxy.protocol.packet.config.TagsUpdatePacket());
+    handler.handleGeneric(com.velocitypowered.proxy.protocol.packet.config.FinishedUpdatePacket.INSTANCE);
+    verify(backend).setActiveSessionHandler(eq(StateRegistry.PLAY), any(TransitionSessionHandler.class));
+    verify(target, never()).connect();
+    assertFalse(result.isDone());
+  }
+
+  @Test
   void cancelledAttemptDoesNotStartFallbackLogin() {
     start();
     result.cancel(false);
@@ -170,6 +200,45 @@ class DetachedLoginTest {
       verify(source, never()).disconnect();
       assertFalse(result.isDone());
       retry.completeExceptionally(new IllegalStateException("normal retry failed"));
+      assertTrue(result.isCompletedExceptionally());
+    } finally {
+      unknown.release();
+    }
+  }
+
+  @Test
+  void unmarkableVisibleArrivalStillFallsBackToNormalLogin() {
+    // The destination never had its arrival sync suppressed, so the mark is advisory. Losing it
+    // must not turn a failed probe into a kicked player on a committed transfer.
+    when(discovery.requireVisibleArrival(player.getUniqueId(), "hub-2"))
+        .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("backend rejected it")));
+    when(discovery.seamlessArrivalApproved(player.getUniqueId())).thenReturn(false);
+    when(target.connect()).thenReturn(new CompletableFuture<>());
+    MinecraftSessionHandler handler = start();
+    ByteBuf unknown = Unpooled.buffer().writeByte(127);
+    try {
+      handler.handleUnknown(unknown);
+      channel.runPendingTasks();
+      verify(target).connect();
+      assertFalse(result.isDone());
+    } finally {
+      unknown.release();
+    }
+  }
+
+  @Test
+  void approvedSeamlessArrivalThatCannotBeUnmarkedFailsTheConnection() {
+    // Here the suppression is already durable at the destination, so retrying through visible
+    // configuration would reset the client without ever synchronizing its position.
+    when(discovery.requireVisibleArrival(player.getUniqueId(), "hub-2"))
+        .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("backend rejected it")));
+    when(discovery.seamlessArrivalApproved(player.getUniqueId())).thenReturn(true);
+    MinecraftSessionHandler handler = start();
+    ByteBuf unknown = Unpooled.buffer().writeByte(127);
+    try {
+      handler.handleUnknown(unknown);
+      channel.runPendingTasks();
+      verify(target, never()).connect();
       assertTrue(result.isCompletedExceptionally());
     } finally {
       unknown.release();

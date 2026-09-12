@@ -2,6 +2,15 @@
 
 Status: proposed, September 7, 2026. No runtime implementation in this change.
 
+**This is the original design record and is deliberately not updated.** Much of it has
+since been built and some of it was built differently — notably, the ordinary switch is
+no longer the only path, and entity-ID rewriting was avoided by negotiating the id with
+the backend rather than by accepting a client reset. For current behaviour see
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md),
+[HANDOFF_IMPLEMENTATION.md](HANDOFF_IMPLEMENTATION.md),
+[DETACHED_CONFIGURATION.md](DETACHED_CONFIGURATION.md) and
+[SEAMLESS_SCOPE.md](SEAMLESS_SCOPE.md).
+
 All proxy functionality described here belongs in the Purroxy jar. Seamless
 handoff additionally requires backend cooperation; a future Nekopur integration
 can supply that directly in the backend jar. This design does not change Nekopur.

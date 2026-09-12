@@ -45,8 +45,9 @@ exists in its own project. See `DISCOVERY_PROTOCOL.md` for discovery and
 
 ## Verification
 
-The latest integrated Gradle run compiled the proxy and passed 230 tests, including
-22 discovery tests, under JDK 25.0.3. Main/test Checkstyle and Spotless application
+The 2026-09-11 run (`ab25cb90`) compiled the proxy and passed **276 tests, 0 failures**
+under JDK 25.0.3. The earlier integrated run described below passed 230 tests, including
+22 discovery tests. Main/test Checkstyle and Spotless application
 also succeeded. Tests include reconnect, configuration/authorization, 200 concurrent
 reservations against an 80-player backend limit, direct/group reservation lifetime,
 stale server references, stale counts and durable region preferences. Shadow jar packaging
@@ -71,5 +72,10 @@ standalone test dependencies/output are under ignored `.gradle/tmp`.
    against a live backend, including control disconnect during login/configuration.
 3. Exercise the existing Nekopur adapter and coordinated handoff with live players:
    source/destination restart, control interruption and repeated hub transfers.
-4. Implement the native 26.2 seamless path and qualify its compatibility matrix.
-   No client continuity has been verified yet.
+4. Qualify the native 26.2 seamless path. It is implemented — detached configuration,
+   entity-ID negotiation and the `JoinGame`/`Respawn` skip are all in
+   [HANDOFF_IMPLEMENTATION.md](HANDOFF_IMPLEMENTATION.md) and
+   [DETACHED_CONFIGURATION.md](DETACHED_CONFIGURATION.md) — but no client continuity has
+   been verified against a real client, and the protocol gate cannot distinguish a
+   native 26.2 client from one a translator rewrote to 776. Open items are tracked in
+   [SEAMLESS_SCOPE.md](SEAMLESS_SCOPE.md).

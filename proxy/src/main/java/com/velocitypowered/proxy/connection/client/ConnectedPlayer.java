@@ -61,6 +61,7 @@ import com.velocitypowered.proxy.VelocityServer;
 import com.velocitypowered.proxy.adventure.VelocityBossBarImplementation;
 import com.velocitypowered.proxy.connection.MinecraftConnection;
 import com.velocitypowered.proxy.connection.MinecraftConnectionAssociation;
+import com.velocitypowered.proxy.connection.backend.SeamlessConfiguration;
 import com.velocitypowered.proxy.connection.backend.VelocityServerConnection;
 import com.velocitypowered.proxy.connection.player.bossbar.BossBarManager;
 import com.velocitypowered.proxy.connection.player.bundle.BundleDelimiterHandler;
@@ -79,6 +80,7 @@ import com.velocitypowered.proxy.protocol.packet.ClientboundStopSoundPacket;
 import com.velocitypowered.proxy.protocol.packet.ClientboundStoreCookiePacket;
 import com.velocitypowered.proxy.protocol.packet.DisconnectPacket;
 import com.velocitypowered.proxy.protocol.packet.HeaderAndFooterPacket;
+import com.velocitypowered.proxy.protocol.packet.JoinGamePacket;
 import com.velocitypowered.proxy.protocol.packet.KeepAlivePacket;
 import com.velocitypowered.proxy.protocol.packet.PluginMessagePacket;
 import com.velocitypowered.proxy.protocol.packet.RemoveResourcePackPacket;
@@ -182,7 +184,10 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   private @Nullable VelocityServerConnection connectionInFlight;
   // The configuration baseline outlives the connection that produced it: a seamless switch has to
   // compare the NEXT backend's negotiation against what this client was actually configured with.
-  private volatile com.velocitypowered.proxy.connection.backend.SeamlessConfiguration.@Nullable Baseline seamlessBaseline;
+  private volatile SeamlessConfiguration.@Nullable Baseline seamlessBaseline;
+  // The JoinGame state the client currently holds. A detached switch can omit the destination's
+  // JoinGame only when all client-significant fields other than entity id remain identical.
+  private volatile SeamlessConfiguration.@Nullable JoinBaseline seamlessJoinBaseline;
   // Survives the backend connection that issued it, so a restarted or dead backend does not lose the
   // id the client is still using. Lives only as long as this player's proxy session.
   private volatile int lastKnownEntityId;
@@ -676,14 +681,27 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   }
 
   /** The configuration this client was last successfully negotiated with, if it is still usable. */
-  public com.velocitypowered.proxy.connection.backend.SeamlessConfiguration.@Nullable Baseline seamlessBaseline() {
+  public SeamlessConfiguration.@Nullable Baseline seamlessBaseline() {
     return seamlessBaseline;
   }
 
   /** Records the configuration baseline observed on a completed backend negotiation. */
   public void setSeamlessBaseline(
-      com.velocitypowered.proxy.connection.backend.SeamlessConfiguration.@Nullable Baseline baseline) {
+      SeamlessConfiguration.@Nullable Baseline baseline) {
     this.seamlessBaseline = baseline;
+  }
+
+  /** Whether a destination JoinGame describes the PLAY state this client already holds. */
+  public boolean matchesSeamlessJoin(JoinGamePacket packet) {
+    var baseline = seamlessJoinBaseline;
+    return baseline != null && baseline.matches(packet, getProtocolVersion());
+  }
+
+  /** Records the JoinGame state actually installed in this client. */
+  public void setSeamlessJoin(JoinGamePacket packet) {
+    this.seamlessJoinBaseline = getProtocolVersion() == ProtocolVersion.MINECRAFT_26_2
+        ? SeamlessConfiguration.captureJoin(packet, getProtocolVersion())
+        : null;
   }
 
   public @Nullable VelocityServerConnection getConnectionInFlight() {
@@ -1590,6 +1608,17 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
               discovery.finish(admission);
               if ((exception != null || result == null || !result.isSuccessful())
                   && discovery.needsHandoffRecovery(getUniqueId()) && getConnectedServer() == handoffSource) {
+                // Disconnecting makes this player inactive, and every handler that would otherwise
+                // report the failure bails out on an inactive player. Record the cause here, or a
+                // committed handoff that could not be completed leaves nothing but the kick message.
+                logger.error("{}: committed handoff to {} could not be completed ({}); the player must"
+                    + " reconnect to recover at its recorded owner.", this,
+                    realDestination.getServerInfo().getName(),
+                    exception != null ? "the connection attempt failed"
+                        : result == null ? "no connection result was produced"
+                            : result.getStatus() + result.getReasonComponent()
+                                .map(reason -> ": " + PASS_THRU_TRANSLATE.serialize(reason)).orElse(""),
+                    exception);
                 disconnect(Component.text("Your transfer needs recovery. Reconnect to resume at its recorded owner."));
               }
             }

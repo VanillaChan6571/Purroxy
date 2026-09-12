@@ -13,22 +13,40 @@ plugin data or arbitrary world changes. Both replicas must already contain the s
 map. Backend implementation and wire details are in Nekopur's
 [`HANDOFF_PROTOCOL.md`](../../Nekopur/docs/HANDOFF_PROTOCOL.md).
 
+The transaction also carries the client's entity ID: `stage` asks the destination to
+reserve the id the client already holds, and its reply says which id it will really
+use. At `fence` the source removes every entity it had shown that client and reports
+those ids. Both exist so the switch can complete without resetting the client; neither
+changes the data the profile transfers.
+
 ## Enabling coordinated transfers
 
 Enable authenticated discovery first. In each participating backend's
-`Nekopurr.yaml`, enable `handoff.enabled`, set the same `handoff.world-identity` and
-`handoff.map-revision`, and retain the `hub-position` profile. In the proxy's
-`purroxy-network.toml`, set `handoff-mode = "normal"` inside the target group table.
-Handoff is disabled by default.
+`Nekopurr.yaml`, enable `transfers.enabled`, set the same `transfers.map-id` and
+`transfers.map-revision`, and retain the `hub-position` profile. The legacy
+`handoff.enabled` / `handoff.world-identity` / `handoff.map-revision` keys remain
+readable as aliases. In the proxy's `purroxy-network.toml`, set
+`handoff-mode = "normal"` inside the target group table. Handoff is disabled by default.
+
+For the seamless path, use `handoff-mode = "seamless-preferred"` instead, and set
+`transfers.sync-arrival-position: false` on the backends — a seamless arrival must not
+be teleported back to the position the source froze it at.
 
 An unavailable or incompatible handoff capability uses ordinary routing in normal
 and seamless-preferred modes. An unresolved prior transaction is recovered before
 ordinary routing is allowed, even if the group's mode was subsequently disabled.
 
-`seamless-preferred` currently performs the coordinated handoff with the normal
-visible client transition. `seamless-required` rejects the request: client continuity
-is not implemented or qualified. Advertising matching map metadata is insufficient
-to enable it.
+`seamless-preferred` performs the coordinated handoff and, when the destination
+negotiates an identical configuration and keeps both the client's entity ID and
+client-significant JoinGame state, completes the switch without sending `JoinGame` or
+`Respawn` — no loading screen. Any condition failing degrades to the ordinary visible
+switch. Before a failed detached CONFIG probe reconnects, the proxy durably marks the
+destination arrival visible so its normal position sync is retained. See
+[detached configuration and the seamless switch](DETACHED_CONFIGURATION.md).
+
+`seamless-required` still rejects the request outright. It is not a stricter form of
+the above: it remains wired to refuse until the path has been qualified against live
+clients, and advertising matching map metadata does not enable it.
 
 ## Failure behavior
 
@@ -68,8 +86,10 @@ are not silently acknowledged.
 
 The detached handler validates the destination against that baseline, answers backend
 keepalives/pings, replays the selection, and acknowledges finish in CONFIG before
-switching the backend codecs to PLAY. It has a ten-second deadline, rejects mismatches,
-and has no client connection to which it could forward configuration packets.
+switching the backend codecs to PLAY. Before that acknowledgment, it also persists the
+destination's explicit seamless-arrival approval; normal arrival synchronization is the
+safe default until this point. It has a ten-second deadline, rejects mismatches, and has
+no client connection to which it could forward configuration packets.
 
 The subsequent configuration implementation passed 252 proxy tests, including 11 new
 configuration tests, main/test Checkstyle and jar packaging. New cases cover exact
@@ -77,16 +97,20 @@ matching, registry/tag mismatch, early finish, duplicate selection, unsupported 
 or plugin exchanges, buffer ownership, oversized capture, acknowledgment order,
 timeout, cancellation and preservation of ordinary packet dispatch.
 
-The handler is now installed for eligible committed `seamless-preferred` transfers;
-see [detached configuration wiring](DETACHED_CONFIGURATION.md). The matching path
-skips `doSwitch()` and keeps the client in PLAY during backend configuration.
-It still uses JoinGame/Respawn to reset client state and adopt the destination's
-entity ID, so terrain loading can remain. This is not full screen-free continuity.
-Mismatches retry ordinary configuration once, retaining committed player ownership.
-`seamless-required` remains unavailable. Native client testing and qualification of
-proxy configuration plugins/translators are still necessary.
+As of 2026-09-12, `:velocity-proxy:test` passes **281 tests, 0 failures** on JDK 25.0.3.
+The suite now directly covers JoinGame equivalence, the `JoinGame`/`Respawn` skip
+predicate, and durable visible fallback in addition to configuration and handoff tests.
+
+The handler is installed for eligible committed `seamless-preferred` transfers;
+see [detached configuration and the seamless switch](DETACHED_CONFIGURATION.md). The
+matching path skips `doSwitch()` and keeps the client in PLAY during backend
+configuration. Mismatches retry ordinary configuration once, retaining committed
+player ownership. `seamless-required` remains unavailable. Native client testing and
+qualification of proxy configuration plugins/translators are still necessary.
 
 Live two-backend tests with a native 26.2 client, injected process/control failures,
 and repeated transfers remain required. ViaVersion/ViaBackwards continuity is not
-qualified. The current jar must not be presented as a completed loading-screen-free
-transfer implementation.
+qualified, although an installed ViaVersion now positively gates eligibility on its
+reported original client protocol. The loading-screen-free path exists in code and is unverified against a real
+client; do not present it as qualified until the checks in
+[DETACHED_CONFIGURATION.md](DETACHED_CONFIGURATION.md) have been run on live hubs.

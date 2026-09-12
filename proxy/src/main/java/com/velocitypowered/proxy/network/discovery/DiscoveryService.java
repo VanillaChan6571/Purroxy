@@ -244,13 +244,14 @@ public final class DiscoveryService implements AutoCloseable {
     // switch need not reset the client. The destination refuses if that id is taken.
     // Prefer the live connection, but fall back to the last id we saw for this player: a backend that
     // died takes its connection with it, and the client still holds the id it was given.
+    String mode = configuration.handoffModes().getOrDefault(group, "off");
     int requestedEntityId = 0;
-    if (player instanceof com.velocitypowered.proxy.connection.client.ConnectedPlayer connected) {
+    if (mode.startsWith("seamless-")
+        && player instanceof com.velocitypowered.proxy.connection.client.ConnectedPlayer connected) {
       requestedEntityId = connected.getConnectedServer() != null
           ? connected.getConnectedServer().getEntityId() : connected.lastKnownEntityId();
     }
-    return handoff.prepare(player.getUniqueId(), source, destination,
-        configuration.handoffModes().getOrDefault(group, "off"), valid, playerLoop, requestedEntityId);
+    return handoff.prepare(player.getUniqueId(), source, destination, mode, valid, playerLoop, requestedEntityId);
   }
 
   /** Finalizes source release only after Velocity reports a successful destination connection. */
@@ -261,6 +262,29 @@ public final class DiscoveryService implements AutoCloseable {
         return null;
       });
     }
+  }
+
+  /** Ensures a detached-config fallback receives the backend's ordinary arrival teleport. */
+  public CompletableFuture<Void> requireVisibleArrival(UUID player, String destination) {
+    return handoff == null ? CompletableFuture.completedFuture(null)
+        : handoff.requireVisibleArrival(player, destination);
+  }
+
+  /** Approves suppressing the arrival sync after detached CONFIG has matched. */
+  public CompletableFuture<Void> approveSeamlessArrival(UUID player, String destination) {
+    return handoff == null ? CompletableFuture.failedFuture(
+        new IllegalStateException("Coordinated handoff is unavailable"))
+        : handoff.approveSeamlessArrival(player, destination);
+  }
+
+  /** Entities the source had shown this client, reported when it fenced. */
+  public int[] sourceEntities(UUID player) {
+    return handoff == null ? new int[0] : handoff.sourceEntities(player);
+  }
+
+  /** Whether the destination was already told to suppress this player's arrival position sync. */
+  public boolean seamlessArrivalApproved(UUID player) {
+    return handoff != null && handoff.seamlessArrivalApproved(player);
   }
 
   public boolean hasCommittedHandoff(UUID player) {
@@ -276,7 +300,11 @@ public final class DiscoveryService implements AutoCloseable {
     Optional<HandoffCoordinator.Peer> from = handoffPeer(source);
     Optional<HandoffCoordinator.Peer> to = handoffPeer(destination);
     return handoff != null && handoff.recoveryOwner(player).filter(destination::equals).isPresent()
+        && handoff.canRetainEntityId(player)
         && from.isPresent() && to.isPresent()
+        // Both ends must implement arrival control. Without it the destination decides on its own
+        // whether to send its arrival sync, and this proxy cannot hold that decision.
+        && from.get().capabilities().seamless() && to.get().capabilities().seamless()
         && from.get().capabilities().matches(to.get().capabilities())
         && registry.snapshots().stream().filter(snapshot -> snapshot.resume().serverId().equals(destination))
         .anyMatch(snapshot -> configuration.handoffModes().getOrDefault(snapshot.resume().group(), "off")

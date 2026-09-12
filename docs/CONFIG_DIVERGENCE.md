@@ -1,6 +1,9 @@
 # Configuration divergence: recovered investigation and next test
 
-Updated 2026-09-10. This is a diagnostic checkpoint, not activation of seamless switching.
+Updated 2026-09-10; re-checked 2026-09-11. This documents the observer's diagnostics.
+Seamless switching has since been activated for `seamless-preferred` groups — see
+[DETACHED_CONFIGURATION.md](DETACHED_CONFIGURATION.md) — but the observer described here
+is still the *normal*-path recorder and still performs a visible switch.
 
 ## Recovered work
 
@@ -69,5 +72,9 @@ console or its `logs/latest.log`. Record whether Via or packet plugins are activ
 No changes to world files are necessary to gather this evidence.
 
 The result determines whether to fix content drift, account for harmless wire
-ordering, or correct the capture. Actual activation still requires ownership-safe
-backend admission, entity-ID handling and client-state reconciliation.
+ordering, or correct the capture.
+
+Ownership-safe backend admission, entity-ID handling and client-state reconciliation —
+listed here as prerequisites for activation — have since landed. This evidence was never
+gathered first, so the production divergence rate between the hubs is still unknown and
+is now observed only as seamless switches succeeding or falling back.

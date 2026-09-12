@@ -1,7 +1,8 @@
 # Backend resume protocol, version 1
 
 Implementation is in progress. This document specifies the currently implemented
-transport for the future Nekopurr adapter; data handoff is not implemented yet.
+transport for the Nekopurr adapter. Coordinated data handoff is layered on this same
+connection; see [HANDOFF_IMPLEMENTATION.md](HANDOFF_IMPLEMENTATION.md).
 
 ## Connection
 

@@ -34,19 +34,30 @@ final class SeamlessConfigSessionHandler implements MinecraftSessionHandler {
   private final CompletableFuture<Void> result;
   private ScheduledFuture<?> timeout;
   private final java.util.function.BooleanSupplier valid;
+  private final java.util.function.Supplier<CompletableFuture<Void>> approveArrival;
+  private boolean finishing;
 
   SeamlessConfigSessionHandler(MinecraftConnection backend, MinecraftSessionHandler next,
       SeamlessConfiguration.Baseline baseline, CompletableFuture<Void> result) {
-    this(backend, next, baseline, result, () -> true);
+    this(backend, next, baseline, result, () -> true,
+        () -> CompletableFuture.completedFuture(null));
   }
 
   SeamlessConfigSessionHandler(MinecraftConnection backend, MinecraftSessionHandler next,
       SeamlessConfiguration.Baseline baseline, CompletableFuture<Void> result, java.util.function.BooleanSupplier valid) {
+    this(backend, next, baseline, result, valid, () -> CompletableFuture.completedFuture(null));
+  }
+
+  SeamlessConfigSessionHandler(MinecraftConnection backend, MinecraftSessionHandler next,
+      SeamlessConfiguration.Baseline baseline, CompletableFuture<Void> result,
+      java.util.function.BooleanSupplier valid,
+      java.util.function.Supplier<CompletableFuture<Void>> approveArrival) {
     this.backend = backend;
     this.next = next;
     this.negotiation = new SeamlessConfiguration(baseline, backend.getProtocolVersion());
     this.result = result;
     this.valid = valid;
+    this.approveArrival = approveArrival;
     result.whenComplete((ignored, failure) -> {
       if (result.isCancelled()) {
         backend.eventLoop().execute(() -> {
@@ -71,18 +82,42 @@ final class SeamlessConfigSessionHandler implements MinecraftSessionHandler {
 
   @Override
   public void handleGeneric(MinecraftPacket packet) {
-    if (result.isDone()) {
+    if (result.isDone() || finishing) {
       return;
     }
     try {
       if (!valid.getAsBoolean()) {
         throw new IllegalStateException("Client state changed during detached configuration");
       }
-      negotiation.accept(packet).ifPresent(backend::write);
+      MinecraftPacket response = negotiation.accept(packet).orElse(null);
       if (negotiation.complete()) {
-        // The finish acknowledgment must be encoded in CONFIG before switching backend codecs.
-        backend.setActiveSessionHandler(StateRegistry.PLAY, next);
-        result.complete(null);
+        finishing = true;
+        // Keep the backend in CONFIG until the destination has durably approved suppressing its
+        // arrival sync. It cannot emit JoinGame before this acknowledgment is written.
+        CompletableFuture<Void> approval = approveArrival.get();
+        java.util.function.BiConsumer<Void, Throwable> finish = (ignored, approvalFailure) -> {
+          if (result.isDone()) {
+            return;
+          } else if (approvalFailure != null) {
+            fail(approvalFailure);
+          } else if (!valid.getAsBoolean()) {
+            fail(new IllegalStateException("Client state changed while approving seamless arrival"));
+          } else {
+            if (response != null) {
+              backend.write(response);
+            }
+            backend.setActiveSessionHandler(StateRegistry.PLAY, next);
+            result.complete(null);
+          }
+        };
+        if (approval.isDone()) {
+          // A completed approval is already running on this backend event loop (or is a test stub).
+          approval.whenComplete(finish);
+        } else {
+          approval.whenCompleteAsync(finish, backend.eventLoop());
+        }
+      } else if (response != null) {
+        backend.write(response);
       }
     } catch (RuntimeException failure) {
       fail(failure);
@@ -91,6 +126,9 @@ final class SeamlessConfigSessionHandler implements MinecraftSessionHandler {
 
   @Override
   public void handleUnknown(ByteBuf packet) {
+    if (finishing) {
+      return;
+    }
     fail(new IllegalStateException("Unknown packet during detached configuration"));
   }
 

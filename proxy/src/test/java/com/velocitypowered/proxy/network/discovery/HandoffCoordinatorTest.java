@@ -124,6 +124,52 @@ class HandoffCoordinatorTest {
   }
 
   @Test
+  void arrivalControlIsNotSentToUnadvertisedBackends() throws Exception {
+    FakeBackends backends = new FakeBackends();
+    try (HandoffCoordinator coordinator = new HandoffCoordinator(directory, backends)) {
+      coordinator.prepare(player, "hub-1", "hub-2", "seamless-preferred", () -> true,
+          Runnable::run, 42).get(5, TimeUnit.SECONDS);
+      HandoffCoordinator.Peer old = backends.peers.get("hub-2");
+      backends.peers.put("hub-2", new HandoffCoordinator.Peer(old.name(), old.session(),
+          new HandoffCapabilities(1, "hub-position", "hub", "v1", false)));
+      // An older backend answers "unknown operation" to both. Asking for a mark it cannot make
+      // must not cost a committed transfer, and approval must fail rather than be assumed.
+      assertFalse(coordinator.supportsArrivalControl("hub-2"));
+      coordinator.requireVisibleArrival(player, "hub-2").get(5, TimeUnit.SECONDS);
+      assertThrows(java.util.concurrent.ExecutionException.class,
+          () -> coordinator.approveSeamlessArrival(player, "hub-2").get(5, TimeUnit.SECONDS));
+      assertFalse(coordinator.seamlessArrivalApproved(player));
+      assertFalse(backends.mutations.contains("hub-2:visible"));
+      assertFalse(backends.mutations.contains("hub-2:seamless"));
+    }
+  }
+
+  @Test
+  void visibleFallbackIsPersistedAtTheCommittedDestinationBeforeReconnect() throws Exception {
+    FakeBackends backends = new FakeBackends();
+    try (HandoffCoordinator coordinator = new HandoffCoordinator(directory, backends)) {
+      final HandoffCoordinator.Ticket ticket = coordinator.prepare(player, "hub-1", "hub-2",
+          "seamless-preferred", () -> true, Runnable::run, 42).get(5, TimeUnit.SECONDS);
+      coordinator.requireVisibleArrival(player, "hub-2").get(5, TimeUnit.SECONDS);
+      assertEquals("hub-2:visible", backends.mutations.get(backends.mutations.size() - 1));
+      coordinator.finish(ticket, true).get(5, TimeUnit.SECONDS);
+    }
+  }
+
+  @Test
+  void seamlessArrivalApprovalRequiresTheRetainedEntityId() throws Exception {
+    FakeBackends backends = new FakeBackends();
+    try (HandoffCoordinator coordinator = new HandoffCoordinator(directory, backends)) {
+      final HandoffCoordinator.Ticket ticket = coordinator.prepare(player, "hub-1", "hub-2",
+          "seamless-preferred", () -> true, Runnable::run, 42).get(5, TimeUnit.SECONDS);
+      assertTrue(coordinator.canRetainEntityId(player));
+      coordinator.approveSeamlessArrival(player, "hub-2").get(5, TimeUnit.SECONDS);
+      assertEquals("hub-2:seamless", backends.mutations.get(backends.mutations.size() - 1));
+      coordinator.finish(ticket, true).get(5, TimeUnit.SECONDS);
+    }
+  }
+
+  @Test
   void sourceSessionReplacementBeforeFenceAbortsTheTransaction() throws Exception {
     FakeBackends backends = new FakeBackends();
     try (HandoffCoordinator coordinator = new HandoffCoordinator(directory, backends)) {
@@ -238,7 +284,7 @@ class HandoffCoordinatorTest {
     private String loseAck = "";
 
     private FakeBackends() {
-      HandoffCapabilities capabilities = new HandoffCapabilities(1, "hub-position", "hub", "v1", false);
+      HandoffCapabilities capabilities = new HandoffCapabilities(1, "hub-position", "hub", "v1", true);
       peers.put("hub-1", new HandoffCoordinator.Peer("hub-1", UUID.randomUUID(), capabilities));
       peers.put("hub-2", new HandoffCoordinator.Peer("hub-2", UUID.randomUUID(), capabilities));
     }

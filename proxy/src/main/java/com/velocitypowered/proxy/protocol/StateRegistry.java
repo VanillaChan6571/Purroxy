@@ -78,6 +78,7 @@ import com.velocitypowered.proxy.protocol.packet.LoginPluginMessagePacket;
 import com.velocitypowered.proxy.protocol.packet.LoginPluginResponsePacket;
 import com.velocitypowered.proxy.protocol.packet.PingIdentifyPacket;
 import com.velocitypowered.proxy.protocol.packet.PluginMessagePacket;
+import com.velocitypowered.proxy.protocol.packet.RemoveEntitiesPacket;
 import com.velocitypowered.proxy.protocol.packet.RemovePlayerInfoPacket;
 import com.velocitypowered.proxy.protocol.packet.RemoveResourcePackPacket;
 import com.velocitypowered.proxy.protocol.packet.ResourcePackRequestPacket;
@@ -594,6 +595,12 @@ public enum StateRegistry {
           map(0x4B, MINECRAFT_1_21_5, true),
           map(0x50, MINECRAFT_1_21_9, true),
           map(0x52, MINECRAFT_26_1, true));
+      clientbound.register(
+          RemoveEntitiesPacket.class,
+          RemoveEntitiesPacket::new,
+          // Encode-only, and only where a seamless handoff can happen. Older clients are reset by
+          // JoinGame and Respawn, which clear the entity table on their own.
+          map(0x4D, MINECRAFT_26_1, true));
       clientbound.register(
           RemoveResourcePackPacket.class,
           RemoveResourcePackPacket::new,

@@ -48,6 +48,7 @@ import com.velocitypowered.proxy.protocol.packet.ClientSettingsPacket;
 import com.velocitypowered.proxy.protocol.packet.JoinGamePacket;
 import com.velocitypowered.proxy.protocol.packet.KeepAlivePacket;
 import com.velocitypowered.proxy.protocol.packet.PluginMessagePacket;
+import com.velocitypowered.proxy.protocol.packet.RemoveEntitiesPacket;
 import com.velocitypowered.proxy.protocol.packet.ResourcePackResponsePacket;
 import com.velocitypowered.proxy.protocol.packet.RespawnPacket;
 import com.velocitypowered.proxy.protocol.packet.ServerboundCookieResponsePacket;
@@ -641,6 +642,9 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
    */
   public void handleBackendJoinGame(JoinGamePacket joinGame, VelocityServerConnection destination) {
     final MinecraftConnection serverMc = destination.ensureConnected();
+    final boolean joinStateMatches = player.matchesSeamlessJoin(joinGame);
+    final boolean keepClientPlayState = canKeepClientPlayState(destination.isDetachedConfiguration(),
+        joinGame.getEntityId(), player.lastKnownEntityId(), joinStateMatches);
 
     if (destination.isDetachedConfiguration()) {
       player.getBossBarManager().preparePlayReset();
@@ -661,16 +665,24 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
       player.getConnection().delayedWrite(joinGame);
       // Required for Legacy Forge
       player.getPhase().onFirstJoin(player);
-    } else if (destination.isDetachedConfiguration()
-        && joinGame.getEntityId() == player.lastKnownEntityId()) {
+    } else if (keepClientPlayState) {
       // The destination kept the id this client already holds and its configuration matched, so the
       // client needs neither JoinGame nor Respawn. Skipping them is what removes the loading screen.
-      // The source cleared the entities it had shown this client when it fenced, so the client's
-      // entity table is empty here and the destination's ids cannot alias stale ones.
+      // Nothing else will clear the entities the source had shown this client, so the proxy does it
+      // here, from the list the source reported when it fenced: doing it here rather than at the
+      // source means a source that died in between cannot strand the client with frozen entities
+      // whose ids alias the destination's own.
+      clearSourceEntities();
       player.getTabList().clearAll();
       logger.info("Seamless switch to {}: keeping the client's world, no reset sent.",
           destination.getServerInfo().getName());
     } else {
+      if (destination.isDetachedConfiguration()) {
+        logger.info("Seamless switch to {} requires a visible reset: {}.",
+            destination.getServerInfo().getName(), joinGame.getEntityId() != player.lastKnownEntityId()
+                ? "the destination changed the player entity id"
+                : "the destination JoinGame state differs from the client state");
+      }
       // Clear tab list to avoid duplicate entries
       player.getTabList().clearAll();
 
@@ -686,6 +698,7 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
     destination.setEntityId(joinGame.getEntityId()); // used for sound api
     // Remember it on the player too: the connection holding it disappears if that backend dies.
     player.setLastKnownEntityId(joinGame.getEntityId());
+    player.setSeamlessJoin(joinGame);
     if (player.getProtocolVersion().noLessThan(ProtocolVersion.MINECRAFT_1_20_2)) {
       player.getBossBarManager().sendBossBars();
     } else {
@@ -731,6 +744,24 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
     player.getConnection().flush();
     serverMc.flush();
     destination.completeJoin();
+  }
+
+  /** Removes every entity the fenced source had shown this client, before the destination populates. */
+  private void clearSourceEntities() {
+    if (server.getDiscovery() == null) {
+      return;
+    }
+    int[] stale = server.getDiscovery().sourceEntities(player.getUniqueId());
+    if (stale.length > 0) {
+      player.getConnection().delayedWrite(new RemoveEntitiesPacket(stale));
+      logger.info("Seamless switch: cleared {} entities the source had shown this client.",
+          stale.length);
+    }
+  }
+
+  static boolean canKeepClientPlayState(boolean detached, int destinationEntityId,
+      int currentEntityId, boolean joinStateMatches) {
+    return detached && destinationEntityId == currentEntityId && joinStateMatches;
   }
 
   private void doFastClientServerSwitch(JoinGamePacket joinGame) {

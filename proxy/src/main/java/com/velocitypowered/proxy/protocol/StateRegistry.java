@@ -91,6 +91,8 @@ import com.velocitypowered.proxy.protocol.packet.ServerboundCookieResponsePacket
 import com.velocitypowered.proxy.protocol.packet.ServerboundCustomClickActionPacket;
 import com.velocitypowered.proxy.protocol.packet.ServerboundPlayerLoadedPacket;
 import com.velocitypowered.proxy.protocol.packet.SetCompressionPacket;
+import com.velocitypowered.proxy.protocol.packet.SetObjectivePacket;
+import com.velocitypowered.proxy.protocol.packet.SetPlayerTeamPacket;
 import com.velocitypowered.proxy.protocol.packet.StatusPingPacket;
 import com.velocitypowered.proxy.protocol.packet.StatusRequestPacket;
 import com.velocitypowered.proxy.protocol.packet.StatusResponsePacket;
@@ -601,6 +603,14 @@ public enum StateRegistry {
           // Encode-only, and only where a seamless handoff can happen. Older clients are reset by
           // JoinGame and Respawn, which clear the entity table on their own.
           map(0x4D, MINECRAFT_26_1, true));
+      clientbound.register(
+          SetObjectivePacket.class,
+          SetObjectivePacket::new,
+          map(0x6A, MINECRAFT_26_1, true));
+      clientbound.register(
+          SetPlayerTeamPacket.class,
+          SetPlayerTeamPacket::new,
+          map(0x6D, MINECRAFT_26_1, true));
       clientbound.register(
           RemoveResourcePackPacket.class,
           RemoveResourcePackPacket::new,

@@ -53,6 +53,8 @@ import com.velocitypowered.proxy.protocol.packet.ResourcePackResponsePacket;
 import com.velocitypowered.proxy.protocol.packet.RespawnPacket;
 import com.velocitypowered.proxy.protocol.packet.ServerboundCookieResponsePacket;
 import com.velocitypowered.proxy.protocol.packet.ServerboundPlayerLoadedPacket;
+import com.velocitypowered.proxy.protocol.packet.SetObjectivePacket;
+import com.velocitypowered.proxy.protocol.packet.SetPlayerTeamPacket;
 import com.velocitypowered.proxy.protocol.packet.TabCompleteRequestPacket;
 import com.velocitypowered.proxy.protocol.packet.TabCompleteResponsePacket;
 import com.velocitypowered.proxy.protocol.packet.TabCompleteResponsePacket.Offer;
@@ -672,7 +674,7 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
       // here, from the list the source reported when it fenced: doing it here rather than at the
       // source means a source that died in between cannot strand the client with frozen entities
       // whose ids alias the destination's own.
-      clearSourceEntities();
+      clearSourceState();
       player.getTabList().clearAll();
       logger.info("Seamless switch to {}: keeping the client's world, no reset sent.",
           destination.getServerInfo().getName());
@@ -746,16 +748,33 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
     destination.completeJoin();
   }
 
-  /** Removes every entity the fenced source had shown this client, before the destination populates. */
-  private void clearSourceEntities() {
+  /**
+   * Removes what the fenced source had shown this client and the destination will not replace.
+   * A visible switch gets this for free: JoinGame rebuilds the client's entity table and scoreboard.
+   * Keeping the client in PLAY skips that, so anything the source added and the destination does not
+   * also define would otherwise stay on screen for the rest of the session. The destination's own
+   * state arrives after this, so entries both servers share are simply re-sent.
+   */
+  private void clearSourceState() {
     if (server.getDiscovery() == null) {
       return;
     }
-    int[] stale = server.getDiscovery().sourceEntities(player.getUniqueId());
-    if (stale.length > 0) {
-      player.getConnection().delayedWrite(new RemoveEntitiesPacket(stale));
-      logger.info("Seamless switch: cleared {} entities the source had shown this client.",
-          stale.length);
+    int[] entities = server.getDiscovery().sourceEntities(player.getUniqueId());
+    if (entities.length > 0) {
+      player.getConnection().delayedWrite(new RemoveEntitiesPacket(entities));
+    }
+    String[] objectives = server.getDiscovery().sourceObjectives(player.getUniqueId());
+    for (String objective : objectives) {
+      // Removing the objective also clears any display slot pointing at it, so slots need no pass.
+      player.getConnection().delayedWrite(new SetObjectivePacket(objective));
+    }
+    String[] teams = server.getDiscovery().sourceTeams(player.getUniqueId());
+    for (String team : teams) {
+      player.getConnection().delayedWrite(new SetPlayerTeamPacket(team));
+    }
+    if (entities.length > 0 || objectives.length > 0 || teams.length > 0) {
+      logger.info("Seamless switch: cleared {} entities, {} objectives and {} teams the source had"
+          + " shown this client.", entities.length, objectives.length, teams.length);
     }
   }
 

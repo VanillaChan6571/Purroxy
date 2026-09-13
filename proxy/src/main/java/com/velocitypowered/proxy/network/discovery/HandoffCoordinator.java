@@ -63,6 +63,11 @@ public final class HandoffCoordinator implements AutoCloseable {
   // them from the client itself, so a source that dies between fencing and the switch cannot leave
   // the client holding entities nothing will ever clear.
   private final java.util.Map<UUID, int[]> sourceEntities = new ConcurrentHashMap<>();
+  // Scoreboard objectives and teams the source had shown this client, on the same terms. Unlike
+  // effects these are arbitrary names rather than a registry, so a destination cannot blank them
+  // without being told what they were.
+  private final java.util.Map<UUID, String[]> sourceObjectives = new ConcurrentHashMap<>();
+  private final java.util.Map<UUID, String[]> sourceTeams = new ConcurrentHashMap<>();
   private final java.util.Map<UUID, Ticket> pendingReleases = new ConcurrentHashMap<>();
   // Transfers whose destination was told to suppress its arrival sync. Only these make the
   // matching visible-arrival mark load-bearing on a fallback.
@@ -95,6 +100,16 @@ public final class HandoffCoordinator implements AutoCloseable {
   /** Entities the source had shown this client, for the proxy to remove before the switch. */
   public int[] sourceEntities(UUID player) {
     return sourceEntities.getOrDefault(player, new int[0]);
+  }
+
+  /** Scoreboard objectives the source had shown this client. Removing one clears its display slot. */
+  public String[] sourceObjectives(UUID player) {
+    return sourceObjectives.getOrDefault(player, new String[0]);
+  }
+
+  /** Scoreboard teams the source had shown this client; these also drive other players' nametags. */
+  public String[] sourceTeams(UUID player) {
+    return sourceTeams.getOrDefault(player, new String[0]);
   }
 
   /** The entity id the destination reserved for this player, or 0 when none was negotiated. */
@@ -262,6 +277,9 @@ public final class HandoffCoordinator implements AutoCloseable {
             }
             sourceEntities.put(transfer.player(), ids);
           }
+          readNames(reply, "trackedObjectives")
+              .ifPresent(names -> sourceObjectives.put(transfer.player(), names));
+          readNames(reply, "trackedTeams").ifPresent(names -> sourceTeams.put(transfer.player(), names));
           return transfer;
         }))
         .thenCompose(transfer -> check(transfer, origin, target, valid, playerLoop))
@@ -337,6 +355,14 @@ public final class HandoffCoordinator implements AutoCloseable {
     if (transfer.phase() == HandoffStore.Phase.ABORTED) {
       return rollback(transfer).thenApply(ignored -> null);
     }
+    if (transfer.phase() != HandoffStore.Phase.COMMITTED) {
+      // Only a committed transfer may be finished at its destination. A PREPARING record here
+      // never reached its commit point, so ownership was never transferred and completing it now
+      // would hand the player over on a decision nobody made. Restarting resolves these in the
+      // store, so reaching this means the abort write itself failed: redo it, which also releases
+      // the source this transfer had fenced.
+      return abortBeforeCommit(transfer.player()).thenApply(ignored -> null);
+    }
     if (!transfer.destination().equals(destination)) {
       return CompletableFuture.failedFuture(new IllegalStateException("Reconnect must recover at the committed owner"));
     }
@@ -368,6 +394,8 @@ public final class HandoffCoordinator implements AutoCloseable {
     reservedEntityIds.remove(ticket.player());
     seamlessApprovals.remove(ticket.player(), ticket.transfer());
     sourceEntities.remove(ticket.player());
+    sourceObjectives.remove(ticket.player());
+    sourceTeams.remove(ticket.player());
     HandoffStore.Transfer transfer = store.get(ticket.player());
     if (transfer == null || !transfer.id().equals(ticket.transfer())
         || transfer.generation() != ticket.generation() || !transfer.destination().equals(ticket.destination())) {
@@ -452,6 +480,19 @@ public final class HandoffCoordinator implements AutoCloseable {
       throw new IllegalStateException("Backend handoff reply does not match the transaction");
     }
     return entry;
+  }
+
+  /** Absent rather than empty when a backend predates these fields, so nothing is invented. */
+  private static Optional<String[]> readNames(JsonObject reply, String field) {
+    if (!reply.has(field)) {
+      return Optional.empty();
+    }
+    var reported = reply.getAsJsonArray(field);
+    String[] names = new String[reported.size()];
+    for (int index = 0; index < names.length; index++) {
+      names[index] = reported.get(index).getAsString();
+    }
+    return Optional.of(names);
   }
 
   private static Ticket ticket(HandoffStore.Transfer transfer) {

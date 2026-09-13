@@ -37,12 +37,27 @@ import org.checkerframework.checker.nullness.qual.Nullable;
 public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> identities,
                                      SslContext tls, List<String> fallback,
                                      Map<String, List<String>> forcedHosts, Map<String, String> handoffModes,
-                                     @Nullable PairingStore pairing) {
+                                     @Nullable PairingStore pairing, Map<String, Integer> minReadyPerRegion) {
 
   /** Keeps existing certificate-pinned configurations compatible. */
   public DiscoveryConfiguration(Set<String> groups, Map<String, Identity> identities, SslContext tls,
       List<String> fallback, Map<String, List<String>> forcedHosts, Map<String, String> handoffModes) {
     this(groups, identities, tls, fallback, forcedHosts, handoffModes, null);
+  }
+
+  /** Keeps configurations written before regions had a readiness floor compatible. */
+  public DiscoveryConfiguration(Set<String> groups, Map<String, Identity> identities, SslContext tls,
+      List<String> fallback, Map<String, List<String>> forcedHosts, Map<String, String> handoffModes,
+      @Nullable PairingStore pairing) {
+    this(groups, identities, tls, fallback, forcedHosts, handoffModes, pairing, Map.of());
+  }
+
+  /**
+   * How many backends a group keeps READY in every region that has one, so a player routed to a
+   * region does not pay a cold start. Zero restores pure on-demand waking.
+   */
+  public int minReadyPerRegion(String group) {
+    return minReadyPerRegion.getOrDefault(group, 1);
   }
 
   /** Resolves manually provisioned or automatically paired backend identities. */
@@ -71,6 +86,11 @@ public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> i
     forcedHosts.forEach((host, routes) -> hosts.put(host.toLowerCase(Locale.ROOT), List.copyOf(routes)));
     forcedHosts = Map.copyOf(hosts);
     handoffModes = Map.copyOf(handoffModes);
+    minReadyPerRegion = Map.copyOf(minReadyPerRegion);
+    if (!groups.containsAll(minReadyPerRegion.keySet())
+        || minReadyPerRegion.values().stream().anyMatch(value -> value == null || value < 0)) {
+      throw new IllegalArgumentException("min-ready-per-region must name a group and cannot be negative");
+    }
     if (!groups.containsAll(handoffModes.keySet()) || handoffModes.values().stream()
         .anyMatch(mode -> !Set.of("off", "normal", "seamless-preferred", "seamless-required").contains(mode))) {
       throw new IllegalArgumentException("Invalid group handoff mode");
@@ -119,10 +139,18 @@ public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> i
         throw new IllegalArgumentException("At least one discovery group is required");
       }
       Map<String, String> handoffModes = new HashMap<>();
+      Map<String, Integer> minReadyPerRegion = new HashMap<>();
       for (var groupEntry : groupConfig.valueMap().entrySet()) {
         UnmodifiableConfig settings = (UnmodifiableConfig) groupEntry.getValue();
         String mode = settings.getOrElse("handoff-mode", "off");
         handoffModes.put(groupEntry.getKey().toLowerCase(Locale.ROOT), mode);
+        Object floor = settings.get("min-ready-per-region");
+        if (floor != null) {
+          if (!(floor instanceof Number number) || number.intValue() < 0) {
+            throw new IllegalArgumentException("min-ready-per-region must be a whole number of zero or more");
+          }
+          minReadyPerRegion.put(groupEntry.getKey().toLowerCase(Locale.ROOT), number.intValue());
+        }
       }
       UnmodifiableConfig identityConfig = config.get("backend-identities");
       Map<String, Identity> identities = new HashMap<>();
@@ -177,7 +205,8 @@ public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> i
               .map(value -> ((String) value).toLowerCase(Locale.ROOT)).toList());
         }
       }
-      return java.util.Optional.of(new DiscoveryConfiguration(groups, identities, tls, fallback, forcedHosts, handoffModes, pairing));
+      return java.util.Optional.of(new DiscoveryConfiguration(groups, identities, tls, fallback,
+          forcedHosts, handoffModes, pairing, minReadyPerRegion));
     } catch (RuntimeException exception) {
       throw new IOException("Invalid discovery configuration: " + exception.getMessage(), exception);
     }

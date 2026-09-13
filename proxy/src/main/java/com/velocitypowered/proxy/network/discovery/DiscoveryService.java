@@ -282,6 +282,16 @@ public final class DiscoveryService implements AutoCloseable {
     return handoff == null ? new int[0] : handoff.sourceEntities(player);
   }
 
+  /** Scoreboard objectives the source had shown this client, reported when it fenced. */
+  public String[] sourceObjectives(UUID player) {
+    return handoff == null ? new String[0] : handoff.sourceObjectives(player);
+  }
+
+  /** Scoreboard teams the source had shown this client, reported when it fenced. */
+  public String[] sourceTeams(UUID player) {
+    return handoff == null ? new String[0] : handoff.sourceTeams(player);
+  }
+
   /** Whether the destination was already told to suppress this player's arrival position sync. */
   public boolean seamlessArrivalApproved(UUID player) {
     return handoff != null && handoff.seamlessArrivalApproved(player);
@@ -709,7 +719,15 @@ public final class DiscoveryService implements AutoCloseable {
           managedSleep.contains(s.session()) && s.leaseValid() && s.state() == DiscoveryRegistry.State.SLEEPING))
           && candidates.stream().noneMatch(CapacityPolicy.Candidate::ready);
       boolean highLoad = CapacityPolicy.shouldWake(candidates, false);
-      if (!highLoad && !emptyDemand && candidates.stream().anyMatch(CapacityPolicy.Candidate::ready)
+      // Regions fill independently, and the group total hides it: one region at its safe limit
+      // averages out against an empty one elsewhere and never trips the group threshold. Judge each
+      // region on its own capacity so the region players are actually landing in is what decides.
+      String saturated = candidates.stream().map(c -> c.resume().region()).distinct().sorted()
+          .filter(region -> CapacityPolicy.shouldWake(candidates.stream()
+              .filter(c -> c.resume().region().equals(region)).toList(), false))
+          .findFirst().orElse("");
+      if (!highLoad && !emptyDemand && saturated.isEmpty()
+          && candidates.stream().anyMatch(CapacityPolicy.Candidate::ready)
           && capacityAlerts.remove(group) != null) {
         String recovery = "Group " + group + " has sufficient ready capacity again.";
         logger.info(recovery);
@@ -718,24 +736,80 @@ public final class DiscoveryService implements AutoCloseable {
         server.getAllPlayers().stream().filter(p -> p.hasPermission("purroxy.notifications.capacity"))
             .forEach(p -> p.sendMessage(notice));
       }
-      if (pending || (!highLoad && !emptyDemand)) {
+      // Keep a live backend in every region this group occupies. sleepIdleSpares already refuses to
+      // sleep the last READY member of a region, so this only has to cover a region that was already
+      // fully asleep - at proxy start, or after a backend was lost - where nothing else would wake it
+      // until a player arrived and paid the cold start.
+      if (wakeRegionFloor(group, members, now)) {
+        continue; // A wake is already in flight for this group; load-based waking can follow later.
+      }
+      if (pending || (!highLoad && !emptyDemand && saturated.isEmpty())) {
         continue;
       }
-      String desiredRegion = demand.containsKey(group) ? demandRegions.getOrDefault(group, "")
+      // A saturated region outranks the group-wide picture: it names where players are queuing.
+      String desiredRegion = !saturated.isEmpty() ? saturated
+          : demand.containsKey(group) ? demandRegions.getOrDefault(group, "")
           : candidates.stream().filter(CapacityPolicy.Candidate::ready)
               .max(java.util.Comparator.comparingDouble(c -> (double) c.load() / c.resume().safeLimit()))
               .map(c -> c.resume().region()).orElse("");
-      var spare = members.stream().filter(s -> s.leaseValid() && s.state() == DiscoveryRegistry.State.SLEEPING)
-          .filter(s -> now >= wakeRetryAfter.getOrDefault(s.session(), Long.MIN_VALUE))
-          .sorted(java.util.Comparator.comparing((DiscoveryRegistry.Snapshot s) ->
-              !desiredRegion.isEmpty() && !s.resume().region().equals(desiredRegion))
-              .thenComparing(s -> s.resume().serverId())).findFirst();
+      var sleeping = members.stream().filter(s -> s.leaseValid()
+              && s.state() == DiscoveryRegistry.State.SLEEPING)
+          .filter(s -> now >= wakeRetryAfter.getOrDefault(s.session(), Long.MIN_VALUE)).toList();
+      // Escalate outwards: the pressured region first, then anywhere else in the group. A backend in
+      // the wrong region still carries load, which beats turning players away on latency grounds.
+      var spare = sleeping.stream()
+          .filter(s -> desiredRegion.isEmpty() || s.resume().region().equals(desiredRegion))
+          .min(java.util.Comparator.comparing(s -> s.resume().serverId()));
+      boolean crossRegion = spare.isEmpty();
+      if (crossRegion) {
+        spare = sleeping.stream().min(java.util.Comparator.comparing(s -> s.resume().serverId()));
+      }
       if (spare.isEmpty()) {
-        capacityAlert(group, "No sleeping spare is available; connections will use overflow capacity.");
+        // Nothing left to wake anywhere. Only a human can add capacity now, so say which region.
+        capacityAlert(group, desiredRegion.isEmpty()
+            ? "no sleeping spare is available, so connections will use overflow capacity."
+            : "region " + desiredRegion + " is getting close to full and no spare is left to wake in"
+                + " any region, so please deploy another server there to keep the balance.");
         continue;
+      }
+      if (crossRegion) {
+        logger.info("Region {} of group {} has no spare left; waking {} in {} instead to carry load.",
+            desiredRegion, group, spare.get().resume().serverId(), spare.get().resume().region());
       }
       sendWake(spare.get().session(), group);
     }
+  }
+
+  /**
+   * Wakes one sleeping spare in each region of {@code group} that has fallen below its readiness
+   * floor. Returns whether any wake was sent, so the caller can let it settle before also waking for
+   * load. A region with no sleeping spare left is not an alert: it may simply have none registered.
+   */
+  private boolean wakeRegionFloor(String group, java.util.List<DiscoveryRegistry.Snapshot> members, long now) {
+    int floor = configuration.minReadyPerRegion(group);
+    if (floor <= 0) {
+      return false;
+    }
+    boolean woke = false;
+    for (String region : members.stream().map(s -> s.resume().region()).distinct().toList()) {
+      var inRegion = members.stream().filter(s -> s.resume().region().equals(region)).toList();
+      if (inRegion.stream().anyMatch(s -> waking.containsKey(s.session()))
+          || inRegion.stream().filter(s -> s.leaseValid()
+              && s.state() == DiscoveryRegistry.State.READY).count() >= floor) {
+        continue;
+      }
+      var spare = inRegion.stream()
+          .filter(s -> s.leaseValid() && s.state() == DiscoveryRegistry.State.SLEEPING)
+          .filter(s -> now >= wakeRetryAfter.getOrDefault(s.session(), Long.MIN_VALUE))
+          .min(java.util.Comparator.comparing(s -> s.resume().serverId()));
+      if (spare.isPresent()) {
+        logger.info("Region {} of group {} has no ready backend; waking {} to hold the floor.",
+            region, group, spare.get().resume().serverId());
+        sendWake(spare.get().session(), group);
+        woke = true;
+      }
+    }
+    return woke;
   }
 
   private void sendWake(DiscoveryRegistry.Session session, String group) {
@@ -856,7 +930,7 @@ public final class DiscoveryService implements AutoCloseable {
             + " safe, " + s.resume().hardLimit() + " hard")
         .collect(java.util.stream.Collectors.joining("; "));
     String text = "Group " + group + ": " + reason + " " + counts
-        + ". Start another server in Pterodactyl if demand continues.";
+        + ". Bring another backend online if demand continues.";
     logger.warn(text);
     var notice = net.kyori.adventure.text.Component.text(text, net.kyori.adventure.text.format.NamedTextColor.YELLOW);
     server.getAllPlayers().stream().filter(p -> p.hasPermission("purroxy.notifications.capacity"))

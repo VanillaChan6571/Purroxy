@@ -18,6 +18,10 @@ authentication = "pairing"
 
 [groups.hub]
 handoff-mode = "off" # Opt in with normal or seamless-preferred; required refuses unqualified continuity.
+# Backends kept READY in every region this group occupies, so a player routed to a region never
+# waits for a cold start. The last ready backend in a region is never slept, so this only matters
+# for a region that is already fully asleep. Set 0 to wake purely on demand.
+min-ready-per-region = 1
 
 # One identity per backend. Obtain the SHA-256 fingerprint from its certificate.
 # Membership comes from the authenticated resume, not a manually maintained member list.

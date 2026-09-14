@@ -90,6 +90,19 @@ public final class HandoffCoordinator implements AutoCloseable {
         ? Optional.of(transfer.destination()) : Optional.empty();
   }
 
+  /**
+   * Whether the durable record still names exactly this transfer, generation and destination as
+   * the committed owner. A retry that cannot prove this has been superseded and must not connect.
+   */
+  public boolean ownsCommittedTransfer(UUID player, @Nullable Ticket ticket) {
+    HandoffStore.Transfer transfer = store.get(player);
+    return ticket != null && transfer != null
+        && transfer.phase() == HandoffStore.Phase.COMMITTED
+        && transfer.id().equals(ticket.transfer())
+        && transfer.generation() == ticket.generation()
+        && transfer.destination().equals(ticket.destination());
+  }
+
   /** A lost fence acknowledgment cannot be treated as permission to keep playing on the source. */
   public boolean requiresRecovery(UUID player) {
     HandoffStore.Transfer transfer = store.get(player);

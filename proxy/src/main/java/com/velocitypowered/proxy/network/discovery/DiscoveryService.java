@@ -297,6 +297,11 @@ public final class DiscoveryService implements AutoCloseable {
     return handoff != null && handoff.seamlessArrivalApproved(player);
   }
 
+  /** Whether the durable record still names this exact transfer's destination as the owner. */
+  public boolean ownsCommittedTransfer(UUID player, HandoffCoordinator.@Nullable Ticket ticket) {
+    return handoff != null && handoff.ownsCommittedTransfer(player, ticket);
+  }
+
   public boolean hasCommittedHandoff(UUID player) {
     return handoff != null && handoff.recoveryOwner(player).isPresent();
   }

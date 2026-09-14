@@ -153,10 +153,7 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
     VelocityInboundConnection {
 
   public static final int MAX_CLIENTSIDE_PLUGIN_CHANNELS = Integer.getInteger("velocity.max-clientside-plugin-channels", 1024);
-  /** Attempts a committed transfer gets at its owner before recovery; the owner never changes. */
-  private static final int COMMITTED_OWNER_ATTEMPTS = 3;
-  private static final int COMMITTED_OWNER_BACKOFF_SECONDS = 2;
-  private static final PlainTextComponentSerializer PASS_THRU_TRANSLATE =
+  static final PlainTextComponentSerializer PASS_THRU_TRANSLATE =
       PlainTextComponentSerializer.builder().flattener(TranslatableMapper.FLATTENER).build();
   static final PermissionProvider DEFAULT_PERMISSIONS = s -> PermissionFunction.ALWAYS_UNDEFINED;
 
@@ -717,88 +714,6 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
 
   public void resetInFlightConnection() {
     connectionInFlight = null;
-  }
-
-  /**
-   * Reconnects to the server a committed transfer already handed this player to.
-   *
-   * <p>Ownership stops being negotiable at the commit: the proxy's store will only move a committed
-   * transfer to COMPLETE, and the destination's journal will only move it to ACTIVATED. So a failed
-   * arrival is not a reason to return the player to the source, which no longer owns them - it is a
-   * reason to reach the owner again. This starts no new handoff, because one is already committed to
-   * this destination, and gives up into recovery once the attempts are spent.
-   */
-  private void retryCommittedOwner(RegisteredServer owner,
-      com.velocitypowered.proxy.network.discovery.HandoffCoordinator.@Nullable Ticket ticket,
-      String cause, int attempt) {
-    if (!isActive()) {
-      return;
-    }
-    String destination = owner.getServerInfo().getName();
-    String transfer = ticket == null ? "none" : ticket.transfer().toString();
-    if (attempt > COMMITTED_OWNER_ATTEMPTS) {
-      logger.error("{}: transfer {} to {} exhausted {} attempts at its recorded owner ({})."
-          + " Disconnecting for recovery.", this, transfer, destination,
-          COMMITTED_OWNER_ATTEMPTS, cause);
-      disconnect(Component.text("Your transfer needs recovery."
-          + " Reconnect to resume at its recorded owner."));
-      return;
-    }
-    logger.warn("{}: transfer {} to {} did not arrive ({}); retrying its recorded owner,"
-        + " attempt {} of {}.", this, transfer, destination, cause, attempt,
-        COMMITTED_OWNER_ATTEMPTS);
-    VelocityRegisteredServer previous = connectedServer == null ? null
-        : (VelocityRegisteredServer) connectedServer.getServer();
-    VelocityServerConnection retry =
-        new VelocityServerConnection((VelocityRegisteredServer) owner, previous, this, server);
-    connectionInFlight = retry;
-    final CompletableFuture<Impl> reconnect;
-    try {
-      reconnect = retry.connect();
-    } catch (RuntimeException failure) {
-      if (connectionInFlight == retry) {
-        resetInFlightConnection();
-      }
-      scheduleOwnerRetry(owner, ticket, describeFailure(null, failure), attempt);
-      return;
-    }
-    reconnect.whenCompleteAsync((result, exception) -> {
-      if (connectionInFlight == retry) {
-        resetInFlightConnection();
-      }
-      if (result != null && result.isSuccessful()) {
-        logger.info("{}: transfer {} reached {} on attempt {}; releasing the source.", this,
-            transfer, destination, attempt);
-        // The destination is live at last, so the fenced source can finally be let go.
-        if (server.getDiscovery() != null) {
-          server.getDiscovery().finishHandoff(ticket, true);
-        }
-        return;
-      }
-      scheduleOwnerRetry(owner, ticket, describeFailure(result, exception), attempt);
-    }, connection.eventLoop());
-  }
-
-  /** Spaces retries out so a destination that is still starting has time to finish. */
-  private void scheduleOwnerRetry(RegisteredServer owner,
-      com.velocitypowered.proxy.network.discovery.HandoffCoordinator.@Nullable Ticket ticket,
-      String cause, int attempt) {
-    connection.eventLoop().schedule(() -> retryCommittedOwner(owner, ticket, cause, attempt + 1),
-        (long) attempt * COMMITTED_OWNER_BACKOFF_SECONDS, TimeUnit.SECONDS);
-  }
-
-  /** Renders why an attempt failed, so every report names a stage rather than just failing. */
-  private static String describeFailure(@Nullable Impl result, @Nullable Throwable exception) {
-    if (exception != null) {
-      Throwable cause = exception instanceof CompletionException && exception.getCause() != null
-          ? exception.getCause() : exception;
-      return cause.getClass().getSimpleName() + ": " + cause.getMessage();
-    }
-    if (result == null) {
-      return "no connection result was produced";
-    }
-    return result.getStatus() + result.getReasonComponent()
-        .map(reason -> ": " + PASS_THRU_TRANSLATE.serialize(reason)).orElse("");
   }
 
   /**
@@ -1687,30 +1602,99 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
             this.resetIfInFlightIs(con);
             return CompletableFuture.failedFuture(failure);
           }
-          return attempt.whenCompleteAsync((result, exception) -> {
+          return attempt.handleAsync((result, exception) -> {
             if (discovery != null && admission != null) {
               discovery.finishHandoff(handoffTicket.get(), result != null && result.isSuccessful());
               discovery.finish(admission);
               if ((exception != null || result == null || !result.isSuccessful())
-                  && discovery.needsHandoffRecovery(getUniqueId()) && getConnectedServer() == handoffSource) {
+                  && discovery.needsHandoffRecovery(getUniqueId())
+                  && getConnectedServer() == handoffSource) {
                 // The commit already moved ownership, and neither state machine will un-decide it.
-                // So do not hand the player back to the source: retry the owner the decision named,
-                // and only disconnect once those attempts are spent.
-                retryCommittedOwner(realDestination, handoffTicket.get(),
-                    describeFailure(result, exception), 1);
+                // So do not hand the player back to the source: reach the owner the decision named.
+                this.resetIfInFlightIs(con);
+                return recoverCommittedOwner(realDestination, handoffTicket.get(), handoffSource,
+                    discovery, result, exception);
               }
             }
-            if (isActive() && result != null && !result.isSuccessful() && !result.isSafe()) {
-              handleConnectionException(result.getAttemptedConnection(),
-                  // The only way for the reason to be null is if the result is safe
-                  DisconnectPacket.create(result.getReasonComponent().orElseThrow(),
-                      getProtocolVersion(), connection.getState()), false);
-            }
-            this.resetIfInFlightIs(con);
-          },
-              connection.eventLoop());
+            this.settleAttempt(con, result, exception);
+            // Composed rather than left running alongside: a caller must not be told the switch
+            // failed while the recovery that switch triggered is still in progress.
+            return exception != null ? CompletableFuture.<Impl>failedFuture(exception)
+                : CompletableFuture.completedFuture(result);
+          }, connection.eventLoop()).thenCompose(pending -> pending);
         }, connection.eventLoop());
       });
+    }
+
+    /** Applies the ordinary tail of a finished attempt: report an unsafe failure, then clear it. */
+    private void settleAttempt(VelocityServerConnection established, @Nullable Impl result,
+        @Nullable Throwable exception) {
+      if (isActive() && result != null && !result.isSuccessful() && !result.isSafe()) {
+        handleConnectionException(result.getAttemptedConnection(),
+            // The only way for the reason to be null is if the result is safe
+            DisconnectPacket.create(result.getReasonComponent().orElseThrow(),
+                getProtocolVersion(), connection.getState()), false);
+      }
+      this.resetIfInFlightIs(established);
+    }
+
+    /**
+     * Reaches the owner a committed transfer named, and disconnects only once that is hopeless.
+     * Every attempt re-checks that this player is still ours to move and that the durable record
+     * still names this transfer, so a stale retry can never connect underneath a newer request.
+     */
+    private CompletableFuture<Impl> recoverCommittedOwner(RegisteredServer owner,
+        com.velocitypowered.proxy.network.discovery.HandoffCoordinator.@Nullable Ticket ticket,
+        @Nullable VelocityServerConnection origin,
+        com.velocitypowered.proxy.network.discovery.DiscoveryService discovery,
+        @Nullable Impl result, @Nullable Throwable exception) {
+      final String destination = owner.getServerInfo().getName();
+      final String transfer = ticket == null ? "none" : ticket.transfer().toString();
+      final VelocityRegisteredServer target = (VelocityRegisteredServer) owner;
+      return new CommittedOwnerRetry(connection.eventLoop(), attemptNumber -> {
+        VelocityRegisteredServer previous = origin == null ? null
+            : (VelocityRegisteredServer) origin.getServer();
+        VelocityServerConnection next =
+            new VelocityServerConnection(target, previous, ConnectedPlayer.this, server);
+        connectionInFlight = next;
+        return next.connect().whenComplete((ignored, failure) -> this.resetIfInFlightIs(next));
+      },
+          // Nothing else may have taken this player in between: no other request in flight, and
+          // the source still holding them.
+          () -> isActive() && connectionInFlight == null && getConnectedServer() == origin,
+          () -> discovery.ownsCommittedTransfer(getUniqueId(), ticket),
+          new CommittedOwnerRetry.Outcome() {
+            @Override
+            public void retrying(int attempt, String cause) {
+              logger.warn("{}: transfer {} to {} did not arrive ({}); retrying its recorded owner,"
+                  + " attempt {} of {}.", ConnectedPlayer.this, transfer, destination, cause,
+                  attempt, CommittedOwnerRetry.MAX_ATTEMPTS);
+            }
+
+            @Override
+            public void succeeded(int attempt) {
+              logger.info("{}: transfer {} reached {} on attempt {}; releasing the source.",
+                  ConnectedPlayer.this, transfer, destination, attempt);
+              discovery.finishHandoff(ticket, true);
+            }
+
+            @Override
+            public void abandoned(String why) {
+              // Someone else owns this player now. Saying so beats disconnecting them over a
+              // transfer that is no longer this request's to finish.
+              logger.warn("{}: stopped recovering transfer {} to {}: {}.", ConnectedPlayer.this,
+                  transfer, destination, why);
+            }
+
+            @Override
+            public void exhausted(String cause) {
+              logger.error("{}: transfer {} to {} could not be completed ({}). Disconnecting for"
+                  + " recovery; this player's recorded owner is unchanged.", ConnectedPlayer.this,
+                  transfer, destination, cause);
+              disconnect(Component.text("Your transfer needs recovery."
+                  + " Reconnect to resume at its recorded owner."));
+            }
+          }).start(result, exception);
     }
 
     private void resetIfInFlightIs(VelocityServerConnection establishedConnection) {

@@ -24,6 +24,9 @@ limbo-hold-seconds = 60
 # come back would be knocked straight over again if everyone waiting for it arrived at once,
 # so the queue drains longest-wait-first at this rate.
 limbo-releases-per-second = 2
+# Holders of purroxy.limbo.bypass skip that queue entirely and are not counted against the
+# rate, so whoever can end an outage is never stuck behind it.
+
 
 
 

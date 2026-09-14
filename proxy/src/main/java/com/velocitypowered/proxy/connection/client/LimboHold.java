@@ -55,8 +55,11 @@ public final class LimboHold implements AutoCloseable {
   /** A wait can run for minutes, so the standing notice is paced not to become spam. */
   private static final long NOTICE_MILLIS = 15_000;
 
+  /** Staff who may bypass the queue, so whoever can end an outage is not stuck behind it. */
+  public static final String BYPASS_PERMISSION = "purroxy.limbo.bypass";
+
   private record Held(ConnectedPlayer player, Component reason, long since, long[] lastKeepAlive,
-                      long[] lastNotice) {
+                      long[] lastNotice, boolean priority) {
   }
 
   private final Map<UUID, Held> held = new ConcurrentHashMap<>();
@@ -96,12 +99,15 @@ public final class LimboHold implements AutoCloseable {
       return false;
     }
     long now = System.currentTimeMillis();
+    // Resolved once, here, rather than every tick: a permission lookup can reach a database,
+    // and nobody's staff status changes during the outage they are sitting in.
+    boolean priority = player.hasPermission(BYPASS_PERMISSION);
     if (held.putIfAbsent(player.getUniqueId(),
-        new Held(player, reason, now, new long[] {0}, new long[] {0})) != null) {
+        new Held(player, reason, now, new long[] {0}, new long[] {0}, priority)) != null) {
       return true;
     }
-    logger.info("{} is held in the proxy: no backend would take them. Holding up to {}s.",
-        player.getUsername(), holdMillis / 1000);
+    logger.info("{} is held in the proxy: no backend would take them. Holding up to {}s{}.",
+        player.getUsername(), holdMillis / 1000, priority ? ", bypassing the queue" : "");
     return true;
   }
 
@@ -135,7 +141,8 @@ public final class LimboHold implements AutoCloseable {
       // Longest wait first, so a queue that forms during an outage drains in the order it
       // formed rather than by whoever the map happens to iterate first.
       List<Held> waiting = held.values().stream()
-          .sorted(java.util.Comparator.comparingLong(Held::since)).toList();
+          .sorted(java.util.Comparator.comparing((Held entry) -> !entry.priority())
+              .thenComparingLong(Held::since)).toList();
       int released = 0;
       for (int place = 0; place < waiting.size(); place++) {
         Held entry = waiting.get(place);
@@ -155,8 +162,10 @@ public final class LimboHold implements AutoCloseable {
         notice(player, entry, now, place + 1, waiting.size());
         // Rate limited on purpose. A hub that has just come back would be knocked straight
         // over again by everyone who was waiting for it arriving at once.
-        if (released < releasesPerTick && player.tryLeaveLimbo()) {
-          released++;
+        // Staff are not counted against the rate limit: the point of the limit is to protect a
+        // returning hub from a crowd, and the people who can fix it are not the crowd.
+        if ((entry.priority() || released < releasesPerTick) && player.tryLeaveLimbo()) {
+          released += entry.priority() ? 0 : 1;
           held.remove(player.getUniqueId());
           logger.info("{} left the proxy hold for an available server ({} still waiting).",
               player.getUsername(), waiting.size() - released);
@@ -184,11 +193,11 @@ public final class LimboHold implements AutoCloseable {
       return;
     }
     entry.lastNotice()[0] = now;
-    player.sendMessage(message(waiting, place));
+    player.sendMessage(message(waiting, place, entry.priority()));
   }
 
   /** The standing notice shown while a player waits, with their place in the queue. */
-  static Component message(int waiting, int place) {
+  static Component message(int waiting, int place, boolean priority) {
     String rule = "====================================================";
     return Component.text()
         .append(Component.text(rule, NamedTextColor.DARK_GRAY)).append(Component.newline())
@@ -200,7 +209,9 @@ public final class LimboHold implements AutoCloseable {
         .append(Component.text(waiting, NamedTextColor.WHITE))
         .append(Component.newline())
         .append(Component.text("Your place in the queue: ", NamedTextColor.GRAY))
-        .append(Component.text(place + " of " + waiting, NamedTextColor.WHITE))
+        .append(priority
+            ? Component.text("priority access, not queued", NamedTextColor.GREEN)
+            : Component.text(place + " of " + waiting, NamedTextColor.WHITE))
         .append(Component.newline())
         .append(Component.text(rule, NamedTextColor.DARK_GRAY))
         .build();

@@ -317,16 +317,18 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
     if (!(player.getConnection().getActiveSessionHandler() instanceof ClientPlaySessionHandler)) {
       return "the client is not in play";
     }
-    if (baseline == null) {
-      return "this client has no captured configuration to compare the destination against";
-    }
+    // Protocol first: configuration capture is itself gated to 26.2, so an older client always
+    // lacks a baseline too. Reporting that would name the symptom and hide the cause.
     if (player.getProtocolVersion() != ProtocolVersion.MINECRAFT_26_2) {
-      return "the proxy negotiated an older protocol with this client";
+      return "this client is on an older protocol than the 26.2 seamless path supports";
     }
     int original = originalProtocol(player);
     if (original != ProtocolVersion.MINECRAFT_26_2.getProtocol()) {
       return original < 0 ? "the client's original protocol could not be verified"
           : "the client is translated rather than native 26.2";
+    }
+    if (baseline == null) {
+      return "this client has no captured configuration to compare the destination against";
     }
     if (backend.getProtocolVersion() != ProtocolVersion.MINECRAFT_26_2) {
       return "the destination is not on 26.2";

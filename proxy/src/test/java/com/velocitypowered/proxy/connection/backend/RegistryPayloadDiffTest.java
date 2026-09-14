@@ -95,6 +95,15 @@ class RegistryPayloadDiffTest {
   }
 
   @Test
+  void changedEntryDataNamesTheNbtPathThatDiffers() {
+    byte[] expected = payload(List.of("minecraft:plains"), 1);
+    byte[] received = payload(List.of("minecraft:plains"), 2);
+    String report = RegistryPayloadDiff.describe(expected, received, VERSION, 16);
+    // The entry is a lead; the field is the cause, and the only thing an operator can act on.
+    assertTrue(report.contains("minecraft:plains at [temperature]"), report);
+  }
+
+  @Test
   void differentEntryCountIsReportedWithBothLengths() {
     byte[] expected = payload(List.of("minecraft:plains", "minecraft:desert"), 1);
     byte[] received = payload(List.of("minecraft:plains"), 1);

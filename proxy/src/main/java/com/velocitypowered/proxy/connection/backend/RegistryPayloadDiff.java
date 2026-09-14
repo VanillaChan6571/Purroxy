@@ -25,6 +25,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import net.kyori.adventure.nbt.BinaryTag;
+import net.kyori.adventure.nbt.CompoundBinaryTag;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
  * Explains why two registry payloads differ, rather than only that they do.
@@ -42,7 +45,7 @@ import java.util.Map;
 final class RegistryPayloadDiff {
 
   /** One decoded registry entry, with the span it occupied so byte ranges can be attributed. */
-  record Entry(String id, boolean hasData, int start, int length, int dataHash) {
+  record Entry(String id, boolean hasData, int start, int length, int dataHash, int dataStart) {
   }
 
   /** A contiguous run of differing bytes, half-open, with the value on each side. */
@@ -100,12 +103,14 @@ final class RegistryPayloadDiff {
         String id = ProtocolUtils.readString(buffer, 256);
         boolean hasData = buffer.readBoolean();
         int dataHash = 0;
+        int dataStart = -1;
         if (hasData) {
-          int dataStart = buffer.readerIndex();
+          dataStart = buffer.readerIndex();
           ProtocolUtils.readBinaryTag(buffer, protocol, null);
           dataHash = hash(payload, dataStart, buffer.readerIndex());
         }
-        entries.add(new Entry(id, hasData, start, buffer.readerIndex() - start, dataHash));
+        entries.add(new Entry(id, hasData, start, buffer.readerIndex() - start, dataHash,
+            dataStart));
       }
     } catch (RuntimeException unreadable) {
       return List.copyOf(entries);
@@ -159,7 +164,9 @@ final class RegistryPayloadDiff {
       if (entry.hasData() != other.hasData() && presence.size() < limit) {
         presence.add(entry.id() + " data " + entry.hasData() + "->" + other.hasData());
       } else if (entry.hasData() && entry.dataHash() != other.dataHash() && changed.size() < limit) {
-        changed.add(entry.id());
+        // Entry level is not actionable on its own: a biome that differs somewhere is a lead,
+        // the field that differs is a cause. Decode both sides and name the path.
+        changed.add(entry.id() + fields(expected, entry, received, other, protocol, limit));
       }
     }
     for (Entry entry : after) {
@@ -183,6 +190,64 @@ final class RegistryPayloadDiff {
       report.append("; entries identical in order and value - serialization only");
     }
     return report.toString();
+  }
+
+  /**
+   * The NBT paths on which one entry's data differs, decoded from both payloads. Returns an
+   * empty suffix rather than throwing: this already runs on a failing path and must not add a
+   * second fault to the first.
+   */
+  private static String fields(byte[] expected, Entry before, byte[] received, Entry after,
+      ProtocolVersion protocol, int limit) {
+    if (before.dataStart() < 0 || after.dataStart() < 0) {
+      return "";
+    }
+    BinaryTag one = tagAt(expected, before.dataStart(), protocol);
+    BinaryTag two = tagAt(received, after.dataStart(), protocol);
+    if (one == null || two == null) {
+      return "";
+    }
+    List<String> paths = new ArrayList<>();
+    compare("", one, two, paths, limit);
+    return paths.isEmpty() ? "" : " at " + paths;
+  }
+
+  private static @Nullable BinaryTag tagAt(byte[] payload, int offset, ProtocolVersion protocol) {
+    ByteBuf buffer = Unpooled.wrappedBuffer(payload, offset, payload.length - offset);
+    try {
+      return ProtocolUtils.readBinaryTag(buffer, protocol, null);
+    } catch (RuntimeException unreadable) {
+      return null;
+    } finally {
+      buffer.release();
+    }
+  }
+
+  /** Walks two tags together, recording every path whose value differs. Bounded on both axes. */
+  private static void compare(String path, BinaryTag one, BinaryTag two, List<String> paths,
+      int limit) {
+    if (paths.size() >= limit || path.chars().filter(c -> c == '.').count() > 6) {
+      return;
+    }
+    if (one instanceof CompoundBinaryTag first && two instanceof CompoundBinaryTag second) {
+      java.util.Set<String> keys = new java.util.LinkedHashSet<>(first.keySet());
+      keys.addAll(second.keySet());
+      for (String key : keys) {
+        BinaryTag left = first.get(key);
+        BinaryTag right = second.get(key);
+        String child = path.isEmpty() ? key : path + '.' + key;
+        if (left == null || right == null) {
+          paths.add(child + (left == null ? " added" : " removed"));
+        } else {
+          compare(child, left, right, paths, limit);
+        }
+      }
+      return;
+    }
+    if (!one.equals(two)) {
+      // Named, not printed: a biome's values can be long, and the path is what locates it.
+      paths.add(path.isEmpty() ? "<root>" : path);
+    }
   }
 
   private static Map<String, Integer> positions(List<Entry> entries) {

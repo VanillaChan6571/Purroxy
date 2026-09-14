@@ -208,13 +208,20 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
     ConnectedPlayer player = serverConn.getPlayer();
     VelocityServerConnection source = player.getConnectedServer();
     SeamlessConfiguration.Baseline baseline = player.seamlessBaseline();
-    if (serverConn.detachedAttempted || source == null || !source.isActive() || baseline == null
-        || !isNative26_2(player)
-        || backend.getProtocolVersion() != ProtocolVersion.MINECRAFT_26_2
-        || player.getConnection().getType() != com.velocitypowered.proxy.connection.ConnectionTypes.VANILLA
-        || !(player.getConnection().getActiveSessionHandler() instanceof ClientPlaySessionHandler)
-        || server.getDiscovery() == null || !server.getDiscovery().allowsDetachedConfiguration(
-            player.getUniqueId(), source.getServerInfo().getName(), serverConn.getServerInfo().getName())) {
+    if (serverConn.detachedAttempted) {
+      return false; // The visible retry after a failed probe, which already reported itself.
+    }
+    String refusal = detachedRefusal(player, source, baseline, backend);
+    if (!refusal.isEmpty()) {
+      // A switch that could have been seamless and was not is otherwise invisible: the client just
+      // reconfigures and reloads terrain with nothing recording why. Only report real switches - an
+      // initial login has no source to hand over from and would say so on every single join.
+      if (source != null && source.isActive()
+          && player.getConnection().getActiveSessionHandler() instanceof ClientPlaySessionHandler) {
+        logger.info("Seamless switch to {} not attempted: {}. The client speaks protocol {} and this"
+            + " proxy negotiated {}.", serverConn.getServerInfo().getName(), refusal,
+            originalProtocol(player), player.getProtocolVersion().getProtocol());
+      }
       return false;
     }
     serverConn.detachedAttempted = true;
@@ -298,14 +305,57 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
     return true;
   }
 
-  private boolean isNative26_2(ConnectedPlayer player) {
-    if (player.getProtocolVersion() != ProtocolVersion.MINECRAFT_26_2) {
-      return false;
+  /**
+   * Names the first unmet precondition for a client-invisible switch, or an empty string when every
+   * one is met. Split out from the attempt so a refusal can say which condition actually failed.
+   */
+  private String detachedRefusal(ConnectedPlayer player, VelocityServerConnection source,
+      SeamlessConfiguration.Baseline baseline, MinecraftConnection backend) {
+    if (source == null || !source.isActive()) {
+      return "there is no live source server to hand over from";
     }
+    if (!(player.getConnection().getActiveSessionHandler() instanceof ClientPlaySessionHandler)) {
+      return "the client is not in play";
+    }
+    if (baseline == null) {
+      return "this client has no captured configuration to compare the destination against";
+    }
+    if (player.getProtocolVersion() != ProtocolVersion.MINECRAFT_26_2) {
+      return "the proxy negotiated an older protocol with this client";
+    }
+    int original = originalProtocol(player);
+    if (original != ProtocolVersion.MINECRAFT_26_2.getProtocol()) {
+      return original < 0 ? "the client's original protocol could not be verified"
+          : "the client is translated rather than native 26.2";
+    }
+    if (backend.getProtocolVersion() != ProtocolVersion.MINECRAFT_26_2) {
+      return "the destination is not on 26.2";
+    }
+    if (player.getConnection().getType()
+        != com.velocitypowered.proxy.connection.ConnectionTypes.VANILLA) {
+      return "the client connection is not vanilla";
+    }
+    if (server.getDiscovery() == null) {
+      return "coordinated handoff is unavailable";
+    }
+    if (!server.getDiscovery().allowsDetachedConfiguration(player.getUniqueId(),
+        source.getServerInfo().getName(), serverConn.getServerInfo().getName())) {
+      return "the committed handoff did not qualify for a seamless arrival";
+    }
+    return "";
+  }
+
+  /**
+   * The protocol the client itself speaks. Without a translator that is what this proxy negotiated;
+   * with ViaVersion the proxy sees the backend's protocol instead and only Via knows the original.
+   * Negative when a translator is present but cannot be questioned, so callers fail closed rather
+   * than mistaking a translated client for a native one.
+   */
+  private int originalProtocol(ConnectedPlayer player) {
     // Unit-test server doubles do not install a plugin manager. A real VelocityServer always does.
     if (server.getPluginManager() == null
         || server.getPluginManager().getPlugin("viaversion").isEmpty()) {
-      return true;
+      return player.getProtocolVersion().getProtocol();
     }
     try {
       Class<?> via = Class.forName("com.viaversion.viaversion.api.Via", false,
@@ -314,14 +364,13 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
       Object api = via.getMethod("getAPI").invoke(null);
       Object original = api.getClass().getMethod("getPlayerVersion", java.util.UUID.class)
           .invoke(api, player.getUniqueId());
-      return original instanceof Number number
-          && number.intValue() == ProtocolVersion.MINECRAFT_26_2.getProtocol();
+      return original instanceof Number number ? number.intValue() : -1;
     } catch (ReflectiveOperationException | RuntimeException failure) {
       if (VIA_INSPECTION_WARNING.compareAndSet(false, true)) {
         logger.warn("Seamless transfers are disabled while ViaVersion's original client protocol "
             + "cannot be verified.", failure);
       }
-      return false;
+      return -1;
     }
   }
 

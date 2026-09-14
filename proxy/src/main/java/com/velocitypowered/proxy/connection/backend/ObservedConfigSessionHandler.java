@@ -45,6 +45,16 @@ final class ObservedConfigSessionHandler implements MinecraftSessionHandler {
     ProtocolVersion negotiated = connection.ensureConnected().getProtocolVersion();
     connection.configurationCapture = new SeamlessConfiguration.Capture(negotiated,
         SeamlessProtocols.eligible(connection.server, negotiated));
+    if (connection.getPlayer() != null && connection.server.getDiscovery() != null
+        && connection.server.getDiscovery().captures() != null
+        && connection.server.getDiscovery().captures()
+            .selects(connection.getPlayer().getUniqueId())) {
+      final java.util.UUID player = connection.getPlayer().getUniqueId();
+      final String backend = connection.getServerInfo().getName();
+      connection.configurationCapture.sink((registry, payload, baseline) ->
+          connection.server.getDiscovery().captures().baseline(player, registry, payload,
+              backend, negotiated, "baseline", 0));
+    }
     SeamlessConfiguration.Baseline previous =
         connection.getPlayer() == null ? null : connection.getPlayer().seamlessBaseline();
     if (previous != null) {

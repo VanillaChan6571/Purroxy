@@ -72,6 +72,25 @@ public final class SeamlessConfiguration {
     }
   }
 
+  /**
+   * Where a retained payload goes when an operator has asked for one. Absent by default: the
+   * comparison itself only ever needs hashes, and payloads are large enough that holding them
+   * has to be a deliberate, narrow choice rather than a side effect of capturing.
+   */
+  @FunctionalInterface
+  interface PayloadSink {
+    PayloadSink NONE = (registry, payload, baseline) -> { };
+
+    void payload(String registry, byte[] payload, boolean baseline);
+  }
+
+  /** Reads the registry identifier a payload starts with, or empty when it is not a registry. */
+  static String registryOf(MinecraftPacket packet, byte[] payload) {
+    String described = describePayload(packet, payload);
+    int marker = described.indexOf("registry=");
+    return marker < 0 ? "" : described.substring(marker + "registry=".length());
+  }
+
   /** Client-significant JoinGame state, excluding only the player entity id. */
   public static final class JoinBaseline {
     private final byte[] digest;
@@ -103,6 +122,12 @@ public final class SeamlessConfiguration {
     private byte[] knownPacksReply;
 
     private final ProtocolVersion protocol;
+    private PayloadSink sink = PayloadSink.NONE;
+
+    /** Arms retention for this capture. Only ever called for an operator-selected player. */
+    void sink(PayloadSink sink) {
+      this.sink = sink;
+    }
 
     Capture(ProtocolVersion version, boolean eligible) {
       // Eligibility is decided once, by the seamless policy, and handed in. This only records
@@ -156,6 +181,7 @@ public final class SeamlessConfiguration {
           throw new IllegalStateException("Configuration capture limit exceeded");
         }
         packets.add(fingerprint(packet, payload));
+        sink.payload(registryOf(packet, payload), payload, true);
       } catch (RuntimeException failure) {
         invalidate();
       }
@@ -196,6 +222,12 @@ public final class SeamlessConfiguration {
   private boolean reorderedTags;
 
   private final ProtocolVersion protocol;
+  private PayloadSink sink = PayloadSink.NONE;
+
+  /** Arms reporting for this comparison. Only ever called for an operator-selected player. */
+  void sink(PayloadSink sink) {
+    this.sink = sink;
+  }
 
   SeamlessConfiguration(Baseline baseline, ProtocolVersion version) {
     if (baseline.protocol() != version) {
@@ -235,6 +267,8 @@ public final class SeamlessConfiguration {
       Fingerprint expected = baseline.packets.get(cursor);
       Fingerprint actual = fingerprint(packet, payload);
       if (!expected.matches(actual)) {
+        // Handed over before the throw, so the side that diverged is available to explain it.
+        sink.payload(registryOf(packet, payload), payload, false);
         throw new IllegalStateException("Configuration mismatch at data packet #" + (cursor + 1)
             + ": expected [" + expected.describe() + "], received [" + actual.describe() + "]");
       }

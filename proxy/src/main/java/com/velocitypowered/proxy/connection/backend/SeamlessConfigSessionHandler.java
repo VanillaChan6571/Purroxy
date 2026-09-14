@@ -80,6 +80,11 @@ final class SeamlessConfigSessionHandler implements MinecraftSessionHandler {
         "Detached configuration timed out")), 10, TimeUnit.SECONDS);
   }
 
+  /** Arms payload reporting for this negotiation. Only the owner knows which player this is. */
+  void sink(SeamlessConfiguration.PayloadSink sink) {
+    negotiation.sink(sink);
+  }
+
   @Override
   public void handleGeneric(MinecraftPacket packet) {
     if (result.isDone() || finishing) {

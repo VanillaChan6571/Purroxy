@@ -39,7 +39,8 @@ public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> i
                                      Map<String, List<String>> forcedHosts, Map<String, String> handoffModes,
                                      @Nullable PairingStore pairing,
                                      Map<String, Integer> minReadyPerRegion,
-                                     Set<Integer> seamlessCanaryProtocols) {
+                                     Set<Integer> seamlessCanaryProtocols,
+                                     @Nullable String seamlessCapturePlayer) {
 
   /** Keeps existing certificate-pinned configurations compatible. */
   public DiscoveryConfiguration(Set<String> groups, Map<String, Identity> identities, SslContext tls,
@@ -51,7 +52,8 @@ public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> i
   public DiscoveryConfiguration(Set<String> groups, Map<String, Identity> identities, SslContext tls,
       List<String> fallback, Map<String, List<String>> forcedHosts, Map<String, String> handoffModes,
       @Nullable PairingStore pairing) {
-    this(groups, identities, tls, fallback, forcedHosts, handoffModes, pairing, Map.of(), Set.of());
+    this(groups, identities, tls, fallback, forcedHosts, handoffModes, pairing, Map.of(),
+        Set.of(), null);
   }
 
   /**
@@ -213,7 +215,8 @@ public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> i
         }
       }
       return java.util.Optional.of(new DiscoveryConfiguration(groups, identities, tls, fallback,
-          forcedHosts, handoffModes, pairing, minReadyPerRegion, seamlessCanaryProtocols));
+          forcedHosts, handoffModes, pairing, minReadyPerRegion, seamlessCanaryProtocols,
+          config.get("seamless-capture-player")));
     } catch (RuntimeException exception) {
       throw new IOException("Invalid discovery configuration: " + exception.getMessage(), exception);
     }

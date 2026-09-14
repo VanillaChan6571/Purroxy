@@ -1006,6 +1006,10 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
 
   void teardown() {
     if (server.getDiscovery() != null) {
+      // Nothing retained for diagnosis outlives the session it came from.
+      server.getDiscovery().captures().clear(getUniqueId());
+    }
+    if (server.getDiscovery() != null) {
       server.getDiscovery().cancel(getUniqueId());
     }
     if (connectionInFlight != null) {

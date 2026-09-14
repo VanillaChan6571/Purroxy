@@ -297,13 +297,24 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
       });
     });
     backend.write(new LoginAcknowledgedPacket());
-    backend.setActiveSessionHandler(StateRegistry.CONFIG, new SeamlessConfigSessionHandler(backend,
+    SeamlessConfigSessionHandler detached = new SeamlessConfigSessionHandler(backend,
         new TransitionSessionHandler(server, serverConn, resultFuture), baseline, negotiation,
         () -> !resultFuture.isDone() && player.isActive() && source.isActive()
             && player.getConnectionInFlight() == serverConn && player.getConnectedServer() == source
             && player.seamlessBaseline() == baseline
             && player.getConnection().getActiveSessionHandler() instanceof ClientPlaySessionHandler,
-        () -> approveSeamlessArrival(player, serverConn)));
+        () -> approveSeamlessArrival(player, serverConn));
+    if (server.getDiscovery().captures() != null
+        && server.getDiscovery().captures().selects(player.getUniqueId())) {
+      // Narrow by construction: one selected account, and the store ignores every registry
+      // except the one whose ordering assigns chunk-visible ids.
+      final java.util.UUID captured = player.getUniqueId();
+      final String destination = serverConn.getServerInfo().getName();
+      final ProtocolVersion negotiated = backend.getProtocolVersion();
+      detached.sink((registry, payload, baseline1) -> server.getDiscovery().captures()
+          .mismatch(captured, registry, payload, destination, negotiated, "detached", 1));
+    }
+    backend.setActiveSessionHandler(StateRegistry.CONFIG, detached);
     if (player.getClientSettingsPacket() != null) {
       backend.write(player.getClientSettingsPacket());
     }

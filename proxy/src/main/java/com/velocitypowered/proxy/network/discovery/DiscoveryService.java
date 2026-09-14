@@ -58,6 +58,8 @@ public final class DiscoveryService implements AutoCloseable {
   private final DiscoveryConfiguration configuration;
   private final DiscoveryRegistry registry;
   private final RegionPreferences regionPreferences;
+  private final com.velocitypowered.proxy.connection.backend.SeamlessCaptures captures =
+      new com.velocitypowered.proxy.connection.backend.SeamlessCaptures();
   private final @Nullable HandoffCoordinator handoff;
   private final Map<DiscoveryRegistry.Session, HandoffCapabilities> handoffCapabilities = new HashMap<>();
   private final Map<UUID, HandoffRpc> handoffRequests = new HashMap<>();
@@ -120,6 +122,13 @@ public final class DiscoveryService implements AutoCloseable {
           }) : null;
     } catch (java.io.IOException failure) {
       throw new java.io.UncheckedIOException("Unable to load durable handoff decisions", failure);
+    }
+    if (configuration.seamlessCapturePlayer() != null) {
+      try {
+        captures.select(UUID.fromString(configuration.seamlessCapturePlayer()));
+      } catch (IllegalArgumentException malformed) {
+        logger.warn("seamless-capture-player is not a UUID; payload retention stays off.");
+      }
     }
     timer.scheduleWithFixedDelay(this::maintenance, 1, 1, TimeUnit.SECONDS);
     if (configuration.pairing() != null) {
@@ -295,6 +304,11 @@ public final class DiscoveryService implements AutoCloseable {
   /** Whether the destination was already told to suppress this player's arrival position sync. */
   public boolean seamlessArrivalApproved(UUID player) {
     return handoff != null && handoff.seamlessArrivalApproved(player);
+  }
+
+  /** The narrow, opt-in payload retention used to explain a configuration mismatch. */
+  public com.velocitypowered.proxy.connection.backend.SeamlessCaptures captures() {
+    return captures;
   }
 
   /**

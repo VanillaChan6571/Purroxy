@@ -9,6 +9,12 @@ fallback = ["hub"]
 # listed protocol is one you have qualified, not one this proxy vouches for. Empty by default.
 # seamless-canary-protocols = [775]
 
+# Retains one player's minecraft:worldgen/biome payload so a configuration mismatch can be
+# explained rather than only reported. One account, one registry, dropped when replaced or on
+# disconnect. Leave unset unless you are actively investigating a canary protocol.
+# seamless-capture-player = "00000000-0000-0000-0000-000000000000"
+
+
 [forced-hosts]
 # "play.example.com" = ["hub"]
 

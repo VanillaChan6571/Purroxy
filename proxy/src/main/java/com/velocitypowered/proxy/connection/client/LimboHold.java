@@ -51,7 +51,8 @@ public final class LimboHold implements AutoCloseable {
 
   /** Well inside a vanilla client's own timeout, so it never decides the server has gone away. */
   private static final long KEEP_ALIVE_MILLIS = 8_000;
-  private static final long NOTICE_MILLIS = 5_000;
+  /** A wait can run for minutes, so the standing notice is paced not to become spam. */
+  private static final long NOTICE_MILLIS = 15_000;
 
   private record Held(ConnectedPlayer player, Component reason, long since, long[] lastKeepAlive,
                       long[] lastNotice) {
@@ -98,6 +99,21 @@ public final class LimboHold implements AutoCloseable {
     logger.info("{} is held in the proxy: no backend would take them. Holding up to {}s.",
         player.getUsername(), holdMillis / 1000);
     return true;
+  }
+
+  /**
+   * Tells everyone waiting that something is happening on their behalf, out of band from the
+   * standing notice. Progress is worth interrupting for; the absence of it is not.
+   */
+  public void announce(Component message) {
+    if (held.isEmpty()) {
+      return;
+    }
+    for (Held entry : Map.copyOf(held).values()) {
+      if (entry.player().isActive()) {
+        entry.player().sendMessage(message);
+      }
+    }
   }
 
   /** Stops holding a player, whether they left, were released, or found a server. */

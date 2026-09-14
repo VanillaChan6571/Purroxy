@@ -885,6 +885,12 @@ public final class DiscoveryService implements AutoCloseable {
       }
     });
     logger.info("Requested wake for backend {} in group {}", session.serverId(), group);
+    if (limbo != null) {
+      // Anyone held is watching a frozen world with no idea whether anything is being done.
+      limbo.announce(net.kyori.adventure.text.Component.text("Purroxy detected and requested"
+          + " wake for backend " + session.serverId() + " in group " + group,
+          net.kyori.adventure.text.format.NamedTextColor.AQUA));
+    }
   }
 
   /**
@@ -982,8 +988,12 @@ public final class DiscoveryService implements AutoCloseable {
         .map(s -> s.resume().serverId() + "=" + s.players() + " players, " + s.resume().safeLimit()
             + " safe, " + s.resume().hardLimit() + " hard")
         .collect(java.util.stream.Collectors.joining("; "));
-    String text = "Group " + group + ": " + reason + " " + counts
-        + ". Bring another backend online if demand continues.";
+    // With nothing registered the spare and overflow wording is nonsense, and the empty count
+    // list used to leave a stranded full stop behind it.
+    String text = counts.isEmpty()
+        ? "Group " + group + " has no registered backend at all; nothing can accept players."
+        : "Group " + group + ": " + reason + " " + counts
+            + ". Bring another backend online if demand continues.";
     logger.warn(text);
     var notice = net.kyori.adventure.text.Component.text(text, net.kyori.adventure.text.format.NamedTextColor.YELLOW);
     server.getAllPlayers().stream().filter(p -> p.hasPermission("purroxy.notifications.capacity"))

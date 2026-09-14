@@ -60,6 +60,7 @@ public final class DiscoveryService implements AutoCloseable {
   private final RegionPreferences regionPreferences;
   private final com.velocitypowered.proxy.connection.backend.SeamlessCaptures captures =
       new com.velocitypowered.proxy.connection.backend.SeamlessCaptures();
+  private final com.velocitypowered.proxy.connection.client.@Nullable LimboHold limbo;
   private final @Nullable HandoffCoordinator handoff;
   private final Map<DiscoveryRegistry.Session, HandoffCapabilities> handoffCapabilities = new HashMap<>();
   private final Map<UUID, HandoffRpc> handoffRequests = new HashMap<>();
@@ -102,6 +103,9 @@ public final class DiscoveryService implements AutoCloseable {
     this.configuration = configuration;
     try {
       regionPreferences = new RegionPreferences(java.nio.file.Path.of("purroxy-regions.properties"));
+      limbo = configuration.limboHoldSeconds() > 0
+          ? new com.velocitypowered.proxy.connection.client.LimboHold(
+              configuration.limboHoldSeconds()) : null;
     } catch (java.io.IOException failure) {
       throw new java.io.UncheckedIOException("Unable to load player region preferences", failure);
     }
@@ -313,6 +317,11 @@ public final class DiscoveryService implements AutoCloseable {
   public synchronized String backendInstance(String name) {
     return handoffPeer(name).map(peer -> peer.session().toString().substring(0, 8))
         .orElse("unknown");
+  }
+
+  /** Holds players in the proxy when nothing will take them, or null when that is disabled. */
+  public com.velocitypowered.proxy.connection.client.@Nullable LimboHold limbo() {
+    return limbo;
   }
 
   /** The narrow, opt-in payload retention used to explain a configuration mismatch. */
@@ -985,6 +994,9 @@ public final class DiscoveryService implements AutoCloseable {
   public synchronized void close() {
     timer.shutdownNow();
     regionPreferences.close();
+    if (limbo != null) {
+      limbo.close();
+    }
     if (handoff != null) {
       handoff.close();
     }

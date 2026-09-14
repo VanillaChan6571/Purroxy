@@ -14,6 +14,13 @@ fallback = ["hub"]
 # disconnect. Leave unset unless you are actively investigating a canary protocol.
 # seamless-capture-player = "00000000-0000-0000-0000-000000000000"
 
+# Hold a player in the proxy for this many seconds when no backend will take them, instead of
+# dropping them to the multiplayer screen. Their last world stays on screen, frozen, while the
+# proxy answers keep-alives and retries every server in the group each second. On expiry they
+# are disconnected with the reason they would have received immediately. 0 disables the hold.
+limbo-hold-seconds = 60
+
+
 
 [forced-hosts]
 # "play.example.com" = ["hub"]

@@ -845,7 +845,14 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
       }
 
       switch (event.getResult()) {
-        case DisconnectPlayer res -> disconnect(res.getReasonComponent());
+        case DisconnectPlayer res -> {
+          // Nothing would take this player. If the proxy can hold them, a rolling restart
+          // costs them a frozen world for a few seconds instead of their session.
+          if (server.getDiscovery() == null || server.getDiscovery().limbo() == null
+              || !server.getDiscovery().limbo().hold(this, res.getReasonComponent())) {
+            disconnect(res.getReasonComponent());
+          }
+        }
         case RedirectPlayer res -> createConnectionRequest(res.getServer(), previousConnection).connect()
                 .whenCompleteAsync((status, throwable) -> {
                   if (throwable != null) {
@@ -896,6 +903,32 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
         default -> disconnect(friendlyReason);
       }
     }, connection.eventLoop());
+  }
+
+  /**
+   * Attempts to leave a proxy hold for any server that will take this player now. Previously
+   * tried servers are cleared first: they were refused during an outage, not on their merits.
+   *
+   * @return whether a connection was started, so the caller can stop holding them
+   */
+  boolean tryLeaveLimbo() {
+    if (!isActive() || connectionInFlight != null) {
+      return connectionInFlight != null;
+    }
+    discoveryServersTried.clear();
+    tryIndex = 0;
+    Optional<RegisteredServer> target = getNextServerToTry(null);
+    if (target.isEmpty()) {
+      return false;
+    }
+    createConnectionRequest(target.get()).connect().whenComplete((result, failure) -> {
+      if (failure != null || result == null || !result.isSuccessful()) {
+        // Still nowhere to go: the hold picks this player up again on its next tick.
+        logger.info("{}: leaving the proxy hold for {} did not take; staying held.", this,
+            target.get().getServerInfo().getName());
+      }
+    });
+    return true;
   }
 
   /**
@@ -1008,6 +1041,9 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
     if (server.getDiscovery() != null) {
       // Nothing retained for diagnosis outlives the session it came from.
       server.getDiscovery().captures().clear(getUniqueId());
+      if (server.getDiscovery().limbo() != null) {
+        server.getDiscovery().limbo().release(getUniqueId());
+      }
     }
     if (server.getDiscovery() != null) {
       server.getDiscovery().cancel(getUniqueId());

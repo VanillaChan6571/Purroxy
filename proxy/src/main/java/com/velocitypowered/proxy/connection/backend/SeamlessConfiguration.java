@@ -180,7 +180,7 @@ public final class SeamlessConfiguration {
         if (bytes > MAX_BYTES || packets.size() >= MAX_PACKETS) {
           throw new IllegalStateException("Configuration capture limit exceeded");
         }
-        packets.add(fingerprint(packet, payload));
+        packets.add(fingerprint(packet, payload, protocol));
         sink.payload(registryOf(packet, payload), payload, true);
       } catch (RuntimeException failure) {
         invalidate();
@@ -265,7 +265,7 @@ public final class SeamlessConfiguration {
         throw new IllegalStateException("Destination configuration exceeds capture limit");
       }
       Fingerprint expected = baseline.packets.get(cursor);
-      Fingerprint actual = fingerprint(packet, payload);
+      Fingerprint actual = fingerprint(packet, payload, protocol);
       if (!expected.matches(actual)) {
         // Handed over before the throw, so the side that diverged is available to explain it.
         sink.payload(registryOf(packet, payload), payload, false);
@@ -314,10 +314,18 @@ public final class SeamlessConfiguration {
         || packet instanceof com.velocitypowered.proxy.protocol.packet.config.ClientboundServerLinksPacket;
   }
 
-  private static Fingerprint fingerprint(MinecraftPacket packet, byte[] payload) {
+  private static Fingerprint fingerprint(MinecraftPacket packet, byte[] payload,
+      ProtocolVersion protocol) {
     try {
       byte[] wireDigest = MessageDigest.getInstance("SHA-256").digest(payload);
       byte[] comparisonDigest = wireDigest;
+      if (packet instanceof RegistrySyncPacket) {
+        // Compound-key order is the one difference a client cannot observe across a seamless
+        // switch, because none of this reaches it. Everything else stays load-bearing, and a
+        // payload that cannot be canonicalised safely keeps its wire digest and so must match
+        // byte for byte.
+        comparisonDigest = CanonicalRegistry.digest(payload, protocol).orElse(wireDigest);
+      }
       if (packet instanceof TagsUpdatePacket tags) {
         ByteBuf canonical = Unpooled.buffer(256, MAX_BYTES);
         try {

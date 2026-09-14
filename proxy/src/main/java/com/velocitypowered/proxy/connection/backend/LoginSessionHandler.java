@@ -218,9 +218,14 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
       // initial login has no source to hand over from and would say so on every single join.
       if (source != null && source.isActive()
           && player.getConnection().getActiveSessionHandler() instanceof ClientPlaySessionHandler) {
-        logger.info("Seamless switch to {} not attempted: {}. The client speaks protocol {} and this"
-            + " proxy negotiated {}.", serverConn.getServerInfo().getName(), refusal,
-            originalProtocol(player), player.getProtocolVersion().getProtocol());
+        // Three protocols, because they are not always the same number and the difference is the
+        // whole question: what the client speaks, what this proxy negotiated with it, and what the
+        // destination link negotiated. Where a translator sits is visible in which pair diverges,
+        // rather than assumed.
+        logger.info("Seamless switch to {} not attempted: {}. Client protocol {}, proxy negotiated"
+            + " {}, destination link {}.", serverConn.getServerInfo().getName(), refusal,
+            originalProtocol(player), player.getProtocolVersion().getProtocol(),
+            backend.getProtocolVersion().getProtocol());
       }
       return false;
     }

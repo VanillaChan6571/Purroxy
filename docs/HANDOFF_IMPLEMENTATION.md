@@ -79,7 +79,8 @@ The native 26.2 implementation now includes a backend-only configuration negotia
 engine and session handler. Normal backend negotiations capture bounded SHA-256
 fingerprints of registries, active features, tags, known-pack offers, brand and
 report/link metadata. The client's actual known-pack selection is copied for replay.
-Capturing is active only for the preferred/required seamless discovery modes and native 26.2.
+Capturing is active only for the preferred/required seamless discovery modes, and only at a
+protocol `SeamlessProtocols` treats as eligible.
 Unsupported configuration exchanges invalidate eligibility without changing ordinary
 packet handling. Resource-pack changes, cookies, custom handshakes and unknown packets
 are not silently acknowledged.

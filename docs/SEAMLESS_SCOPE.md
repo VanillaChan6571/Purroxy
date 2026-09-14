@@ -63,9 +63,10 @@ and the canonical registry comparison all have direct tests.
 Two limits shape what can ever match:
 
 - Eligibility is decided in one place, `SeamlessProtocols`. Protocol 776 (26.2) is qualified and
-  always eligible. Any other protocol is a canary: off unless an operator lists it in
-  `seamless-canary-protocols`, and eligible only because they have qualified it themselves.
-  Protocol 775 (26.1.x) has been taken through a live two-hub switch in both directions.
+  always eligible. Anything else from 766 (1.20.5) upward is a canary: off unless an operator
+  lists it in `seamless-canary-protocols`, and eligible only because they have qualified it
+  themselves. Below 766 nothing is eligible however it is configured. Protocol 775 (26.1.x)
+  has been taken through a live two-hub switch in both directions.
 - Equivalence is **byte-identity of the wire encoding**, including the `mc:brand`
   plugin message, with one deliberate exception. For `RegistrySyncPacket` the acceptance check
   is a canonical SHA-256 that ignores NBT compound-key order and nothing else: registry
@@ -84,6 +85,102 @@ The capture cost is real but no longer wasted: every backend CONFIG packet is SH
 hashed and fully copied, and registry sync payloads are the largest packets in the
 handshake. `captureSeamlessBaseline` restricts that to groups that actually opt into a
 seamless mode, so ordinary `normal`/`off` groups do not pay it.
+
+## Extending below 26.1 — the 766-776 band
+
+Added 2026-09-14. The band `SeamlessProtocols` will admit is now 766 (1.20.5/1.20.6) through 776
+(26.2), one entry per protocol number:
+
+| 766 | 767 | 768 | 769 | 770 | 771 | 772 | 773 | 774 | 775 | 776 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1.20.5/6 | 1.21/.1 | 1.21.2/3 | 1.21.4 | 1.21.5 | 1.21.6 | 1.21.7/8 | 1.21.9/10 | 1.21.11 | 26.1.x | 26.2 |
+
+Two bands cannot be split, because Velocity gives each one enum constant: 773 covers 1.21.9 *and*
+1.21.10, 767 covers 1.21 *and* 1.21.1. Qualifying either qualifies both patch releases.
+
+**Why 766 is the floor and not a preference.** A capture becomes a baseline only once it holds the
+client's known-packs reply (`SeamlessConfiguration.Capture.baseline()`), and `KnownPacksPacket` is
+registered only from 1.20.5. An older client therefore negotiates to completion and produces
+nothing, silently. 1.20.5 is also where the per-registry sync shape `CanonicalRegistry` walks was
+introduced, and below 1.20.2 `LoginSessionHandler` routes straight to PLAY with no configuration
+phase for the proxy to absorb at all. A canary entry below 766 would therefore not name an
+unqualified protocol but a broken one, and is refused at startup with a logged reason.
+
+**What the comparison did *not* need.** The configuration packet classes carry no version branches
+at all, and every fingerprint already encodes at the negotiated protocol, so the machinery spans
+the band unchanged. What was 26.2-specific was the gates around it.
+
+**What changed to make the band expressible:**
+
+- `SeamlessProtocols` holds a qualified *set* rather than one constant, plus a `FLOOR` and a table
+  of the clientbound PLAY `update_tags` packet id per protocol. A protocol with no id in that table
+  cannot be made eligible, because the invalidation below would silently never fire.
+- `BackendPlaySessionHandler` no longer watches for 26.2's packet ids. **This was a live defect, not
+  only an obstacle to extending**: the PLAY-phase baseline invalidation was gated on
+  `protocol == MINECRAFT_26_2`, so 775 — already running as a canary — had none at all, and a
+  backend changing tags mid-PLAY left a stale baseline for the next switch to compare against.
+  Worse, two of the three ids it watched (`0x88`, `0x89`) were unreachable: report details and
+  server links are *registered* in PLAY from 1.21, so they decode by type and never arrive at
+  `handleUnknown`. They are now caught by type, and PLAY tags by a per-protocol id. Nothing is read
+  at all when there is no baseline left to invalidate.
+- `CanonicalRegistry` refused only below 1.20.2, but the shape it parses is the 1.20.5 one. 1.20.2
+  and 1.20.3/4 carry every registry as one named root tag; walking that as an identifier and entry
+  list could produce a digest that means nothing. It now refuses below 1.20.5.
+- A canary entry that names no protocol, or one below the floor, is logged and dropped instead of
+  silently ignored, and the resolved set is reported once at startup. A non-numeric entry names
+  itself in the error rather than surfacing as a cast failure.
+
+**The PLAY `update_tags` ids**, since the whole invalidation depends on them being right. Taken
+from the vanilla clientbound ladder and cross-checked against the one neighbour this proxy itself
+registers — `custom_report_details` sits exactly two ids above `update_tags` at every version in
+the band, and `StateRegistry`'s own PLAY registrations (0x7A at 1.21, 0x81 at 1.21.2, 0x86 at
+1.21.9, 0x88 at 26.1) agree with the table on all four:
+
+| 766 | 767 | 768-772 | 773-774 | 775-776 |
+|---|---|---|---|---|
+| 0x78 | 0x78 | 0x7F | 0x84 | 0x86 |
+
+1.20.5 has no `custom_report_details` to check against; there the ladder simply ends one packet
+later, at `projectile_power`.
+
+**Verified here:** 402 tests, 0 failures on JDK 25.0.3, with Checkstyle and Spotless clean. New
+coverage spans the whole band: the floor cannot be configured past, an eligible protocol always has
+a tags id, the canonical digest is identical at every protocol in the band, a capture replays
+against itself at each one, a listed protocol takes the detached path and one below the floor does
+not, and the tags id of one version is not mistaken for another's.
+
+**Not verified here, and not verifiable here — this is the whole of the remaining investigation:**
+
+1. **Where ViaVersion actually sits.** The refusal log already prints all three numbers. On a
+   downlevel client, if client / proxy-negotiated / destination-link are the same number, Via is
+   translating on the backend and this works as designed. If the client number differs from what
+   the proxy negotiated, Via is rewriting the handshake on the proxy and `LoginSessionHandler`'s
+   original-protocol check will refuse every downlevel client by design — that refusal is
+   load-bearing and must not simply be deleted. Read the logs before soaking anything.
+2. **Whether a Via-translated 26.2 backend still produces a capturable configuration phase** at
+   each band: known-packs offer, client reply, at least one registry sync, active features, tags,
+   finish. Arm the observer without listing the protocol, and read the `Seamless check:` lines.
+   This is the standalone soak that was skipped for 776 and 775. Do not skip it a third time.
+3. **Whether ViaBackwards' output is byte-stable across the two hubs.** Byte identity now compares
+   Via's translation on hub-1 against Via's translation on hub-2, so both hubs must run identical
+   Via builds and identical Via configuration. This divergence source does not exist at 776.
+4. **Whether the registry-identifier prefix assumption holds** at 774 and 766. A wrong prefix read
+   is safe — it degrades to byte identity — but every switch would then fall back.
+5. **Whether ViaBackwards ever sends `START_CONFIGURATION` to the client itself** on this path. For
+   766+ the client has a real configuration phase, so this is less likely than the pre-1.20.2 case,
+   but a loading screen appearing while the proxy logs a seamless outcome is exactly that symptom.
+6. **Config packets outside the allow-list.** `SeamlessConfiguration.supported()` does not admit
+   `CodeOfConductPacket` (1.21.9+) or `DialogClearPacket`/`DialogShowPacket` (1.21.6+). Any of them
+   in the destination's configuration phase invalidates the capture and forces the visible path —
+   safe, but it means a hub with a code of conduct never gets a seamless switch. Code of conduct
+   would need its accept reply stored and replayed the way known-packs already is.
+
+**Soak order: 774, then descending.** One protocol at a time; 775's soak is the only precedent and
+it was a single number. Both directions, several round trips, then the things only a human eye
+catches — no loading screen, chat, tab list, boss bars, inventory display, held item, titles,
+effects, NPC entities, and no ghost entities from the source. Then deliberately diverge one test
+hub and confirm exactly one logged fallback. Promote into the qualified set in `SeamlessProtocols`
+only after that, in its own commit.
 
 ## Blockers
 

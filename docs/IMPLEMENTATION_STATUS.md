@@ -1,7 +1,9 @@
 # Network implementation status
 
 The full scope remains `NETWORK_FEATURES_DESIGN.md`, including native 26.2
-seamless transfers. Older-client translation support is deferred by user request.
+seamless transfers. Older-client support is **no longer deferred**: the eligibility policy now
+admits protocols 766 (1.20.5) through 776 (26.2), and each family below 776 is qualified by its
+own live soak before being promoted. See [SEAMLESS_SCOPE.md](SEAMLESS_SCOPE.md).
 
 ## Implemented foundations
 

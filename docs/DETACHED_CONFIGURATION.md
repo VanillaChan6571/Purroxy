@@ -71,8 +71,9 @@ hologram or NPC. See [`HANDOFF_PROTOCOL.md`](../../Nekopur/docs/HANDOFF_PROTOCOL
 
 `ClientPlaySessionHandler.handleBackendJoinGame` makes the final decision from the
 arriving packet, not from the reservation bookkeeping. The reset is skipped only for a
-detached destination whose entity ID matches and whose encoded native-26.2 JoinGame
-matches the current connection after excluding only that four-byte entity-ID field.
+detached destination whose entity ID matches and whose encoded JoinGame, at the protocol the
+connection negotiated, matches the current connection after excluding only that four-byte
+entity-ID field.
 World, dimension, game mode, view/simulation distance and the remaining flags therefore
 must all agree. A mismatch takes the visible path.
 

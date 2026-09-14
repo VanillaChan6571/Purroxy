@@ -18,6 +18,8 @@
 package com.velocitypowered.proxy.connection.backend;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -58,7 +60,8 @@ class SeamlessConfigurationTest {
   void matchingConfigurationReplaysClientSelectionAndFinishes() {
     SeamlessConfiguration negotiation = new SeamlessConfiguration(baseline(), VERSION);
     KnownPacksPacket selected = (KnownPacksPacket) negotiation.accept(packs()).orElseThrow();
-    assertArrayEquals(new byte[] {0}, SeamlessConfiguration.encode(selected, ProtocolUtils.Direction.SERVERBOUND));
+    assertArrayEquals(new byte[] {0}, SeamlessConfiguration.encode(selected,
+        ProtocolUtils.Direction.SERVERBOUND, ProtocolVersion.MINECRAFT_26_2));
     feed(negotiation);
     assertFalse(negotiation.complete());
     assertTrue(negotiation.accept(FinishedUpdatePacket.INSTANCE).isPresent());
@@ -83,7 +86,7 @@ class SeamlessConfigurationTest {
 
   @Test
   void mismatchIdentifiesBothRegistryNamesAndSizesWithoutConsumingBuffers() {
-    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION);
+    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION, true);
     capture.observe(packs());
     capture.select(packs());
     RegistrySyncPacket source = namedRegistry("minecraft:dimension_type");
@@ -110,7 +113,7 @@ class SeamlessConfigurationTest {
 
   @Test
   void differentClientSelectionCannotBeReportedAsIdentical() {
-    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION);
+    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION, true);
     capture.observe(packs());
     KnownPacksPacket reply = new KnownPacksPacket();
     ByteBuf encoded = Unpooled.buffer();
@@ -165,7 +168,7 @@ class SeamlessConfigurationTest {
 
   @Test
   void unsupportedPluginExchangeAndTranslatedProtocolsCannotCreateBaseline() {
-    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION);
+    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION, true);
     PluginMessagePacket custom = new PluginMessagePacket("example:handshake", Unpooled.buffer(0));
     try {
       capture.observe(custom);
@@ -174,14 +177,14 @@ class SeamlessConfigurationTest {
     }
     capture.observe(FinishedUpdatePacket.INSTANCE);
     assertTrue(capture.baseline().isEmpty());
-    assertTrue(new SeamlessConfiguration.Capture(ProtocolVersion.MINECRAFT_26_1).baseline().isEmpty());
+    assertTrue(new SeamlessConfiguration.Capture(ProtocolVersion.MINECRAFT_26_1, false).baseline().isEmpty());
     assertThrows(IllegalArgumentException.class,
         () -> new SeamlessConfiguration(baseline(), ProtocolVersion.MINECRAFT_26_1));
   }
 
   @Test
   void incompleteOrRepeatedSelectionCannotCreateBaseline() {
-    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION);
+    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION, true);
     capture.observe(packs());
     capture.select(packs());
     capture.select(packs());
@@ -311,7 +314,7 @@ class SeamlessConfigurationTest {
 
   @Test
   void oversizedRegistryInvalidatesCaptureWithoutReadingItsContents() {
-    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION);
+    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION, true);
     capture.observe(packs());
     capture.select(packs());
     RegistrySyncPacket packet = new RegistrySyncPacket();
@@ -349,12 +352,23 @@ class SeamlessConfigurationTest {
     }
   }
 
+  @Test
+  void baselineOnlyComparesAgainstTheProtocolItWasCapturedAt() {
+    SeamlessConfiguration.Baseline captured = baseline();
+    assertEquals(VERSION, captured.protocol());
+    // Packet bytes only mean the same thing at one version, so a baseline taken before a client
+    // changed protocol must not be replayed against the new one.
+    assertThrows(IllegalArgumentException.class,
+        () -> new SeamlessConfiguration(captured, ProtocolVersion.MINECRAFT_26_1));
+    assertDoesNotThrow(() -> new SeamlessConfiguration(captured, VERSION));
+  }
+
   static SeamlessConfiguration.Baseline baseline() {
     return baseline(new TagsUpdatePacket());
   }
 
   private static SeamlessConfiguration.Baseline baseline(TagsUpdatePacket tags) {
-    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION);
+    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION, true);
     capture.observe(packs());
     capture.select(packs());
     RegistrySyncPacket packet = registry(1);
@@ -400,16 +414,19 @@ class SeamlessConfigurationTest {
     reversed.put("minecraft:block", reversedTags);
     TagsUpdatePacket source = new TagsUpdatePacket(first);
     TagsUpdatePacket destination = new TagsUpdatePacket(reversed);
-    byte[] original = SeamlessConfiguration.encode(destination, ProtocolUtils.Direction.CLIENTBOUND);
+    byte[] original = SeamlessConfiguration.encode(destination,
+        ProtocolUtils.Direction.CLIENTBOUND, ProtocolVersion.MINECRAFT_26_2);
     assertFalse(java.util.Arrays.equals(original,
-        SeamlessConfiguration.encode(source, ProtocolUtils.Direction.CLIENTBOUND)));
+        SeamlessConfiguration.encode(source, ProtocolUtils.Direction.CLIENTBOUND,
+            ProtocolVersion.MINECRAFT_26_2)));
     SeamlessConfiguration negotiation = new SeamlessConfiguration(baseline(source), VERSION);
     negotiation.accept(packs());
     feed(negotiation, destination);
     negotiation.accept(FinishedUpdatePacket.INSTANCE);
     assertTrue(negotiation.complete());
     assertTrue(negotiation.reorderedTags());
-    assertArrayEquals(original, SeamlessConfiguration.encode(destination, ProtocolUtils.Direction.CLIENTBOUND));
+    assertArrayEquals(original, SeamlessConfiguration.encode(destination,
+        ProtocolUtils.Direction.CLIENTBOUND, ProtocolVersion.MINECRAFT_26_2));
   }
 
   @Test

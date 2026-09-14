@@ -58,10 +58,17 @@ public final class SeamlessConfiguration {
   public static final class Baseline {
     private final List<Fingerprint> packets;
     private final byte[] knownPacksReply;
+    private final ProtocolVersion protocol;
 
-    private Baseline(List<Fingerprint> packets, byte[] reply) {
+    private Baseline(List<Fingerprint> packets, byte[] reply, ProtocolVersion protocol) {
       this.packets = List.copyOf(packets);
       this.knownPacksReply = reply.clone();
+      this.protocol = protocol;
+    }
+
+    /** The protocol this capture was taken at. Bytes only mean the same thing at that version. */
+    public ProtocolVersion protocol() {
+      return protocol;
     }
   }
 
@@ -95,8 +102,13 @@ public final class SeamlessConfiguration {
     private int registries;
     private byte[] knownPacksReply;
 
-    Capture(ProtocolVersion version) {
-      invalid = version != ProtocolVersion.MINECRAFT_26_2;
+    private final ProtocolVersion protocol;
+
+    Capture(ProtocolVersion version, boolean eligible) {
+      // Eligibility is decided once, by the seamless policy, and handed in. This only records
+      // the protocol the bytes were produced at, so a later comparison can insist on the same.
+      this.protocol = version;
+      invalid = !eligible;
     }
 
     void observe(MinecraftPacket packet) {
@@ -138,7 +150,7 @@ public final class SeamlessConfiguration {
           }
           registries++;
         }
-        byte[] payload = encode(packet, ProtocolUtils.Direction.CLIENTBOUND);
+        byte[] payload = encode(packet, ProtocolUtils.Direction.CLIENTBOUND, protocol);
         bytes = Math.addExact(bytes, payload.length);
         if (bytes > MAX_BYTES || packets.size() >= MAX_PACKETS) {
           throw new IllegalStateException("Configuration capture limit exceeded");
@@ -158,7 +170,7 @@ public final class SeamlessConfiguration {
         return;
       }
       try {
-        knownPacksReply = encode(reply, ProtocolUtils.Direction.SERVERBOUND);
+        knownPacksReply = encode(reply, ProtocolUtils.Direction.SERVERBOUND, protocol);
       } catch (RuntimeException failure) {
         invalidate();
       }
@@ -172,7 +184,7 @@ public final class SeamlessConfiguration {
 
     public Optional<Baseline> baseline() {
       return !invalid && finished && features && tags && registries > 0 && knownPacksReply != null
-          ? Optional.of(new Baseline(packets, knownPacksReply)) : Optional.empty();
+          ? Optional.of(new Baseline(packets, knownPacksReply, protocol)) : Optional.empty();
     }
   }
 
@@ -183,11 +195,17 @@ public final class SeamlessConfiguration {
   private boolean failed;
   private boolean reorderedTags;
 
+  private final ProtocolVersion protocol;
+
   SeamlessConfiguration(Baseline baseline, ProtocolVersion version) {
-    if (version != ProtocolVersion.MINECRAFT_26_2) {
-      throw new IllegalArgumentException("Detached configuration requires native 26.2");
+    if (baseline.protocol() != version) {
+      // Packet bytes are only comparable within one protocol. Refusing here is what stops a
+      // baseline captured before a client changed version from being compared against a newer one.
+      throw new IllegalArgumentException("Seamless baseline was captured at "
+          + baseline.protocol() + ", not " + version);
     }
     this.baseline = baseline;
+    this.protocol = version;
   }
 
   /** Returns backend acknowledgments only. Any mismatch permanently invalidates this attempt. */
@@ -209,7 +227,7 @@ public final class SeamlessConfiguration {
       if (!supported(packet) || cursor >= baseline.packets.size()) {
         throw new IllegalStateException("Unsupported destination configuration exchange");
       }
-      byte[] payload = encode(packet, ProtocolUtils.Direction.CLIENTBOUND);
+      byte[] payload = encode(packet, ProtocolUtils.Direction.CLIENTBOUND, protocol);
       bytes = Math.addExact(bytes, payload.length);
       if (bytes > MAX_BYTES) {
         throw new IllegalStateException("Destination configuration exceeds capture limit");
@@ -228,7 +246,7 @@ public final class SeamlessConfiguration {
         KnownPacksPacket reply = new KnownPacksPacket();
         ByteBuf buffer = Unpooled.wrappedBuffer(baseline.knownPacksReply);
         try {
-          reply.decode(buffer, ProtocolUtils.Direction.SERVERBOUND, ProtocolVersion.MINECRAFT_26_2);
+          reply.decode(buffer, ProtocolUtils.Direction.SERVERBOUND, protocol);
         } finally {
           buffer.release();
         }
@@ -299,7 +317,8 @@ public final class SeamlessConfiguration {
     }
   }
 
-  static byte[] encode(MinecraftPacket packet, ProtocolUtils.Direction direction) {
+  static byte[] encode(MinecraftPacket packet, ProtocolUtils.Direction direction,
+      ProtocolVersion protocol) {
     // Deferred packets' encoders consume their content. Copy by index to preserve the live packet.
     if (packet instanceof ByteBufHolder holder) {
       if (holder.content().readableBytes() > MAX_BYTES) {
@@ -309,7 +328,7 @@ public final class SeamlessConfiguration {
     }
     ByteBuf buffer = Unpooled.buffer(256, MAX_BYTES);
     try {
-      packet.encode(buffer, direction, ProtocolVersion.MINECRAFT_26_2);
+      packet.encode(buffer, direction, protocol);
       return ByteBufUtil.getBytes(buffer);
     } finally {
       buffer.release();
@@ -317,9 +336,6 @@ public final class SeamlessConfiguration {
   }
 
   private static byte[] joinDigest(JoinGamePacket packet, ProtocolVersion version) {
-    if (version != ProtocolVersion.MINECRAFT_26_2) {
-      throw new IllegalArgumentException("Seamless JoinGame comparison requires native 26.2");
-    }
     ByteBuf buffer = Unpooled.buffer(256, MAX_BYTES);
     try {
       packet.encode(buffer, ProtocolUtils.Direction.CLIENTBOUND, version);

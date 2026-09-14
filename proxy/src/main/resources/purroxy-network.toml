@@ -23,6 +23,12 @@ handoff-mode = "off" # Opt in with normal or seamless-preferred; required refuse
 # for a region that is already fully asleep. Set 0 to wake purely on demand.
 min-ready-per-region = 1
 
+# Client protocols allowed to take the seamless, loading-screen-free path in addition to the
+# qualified 26.2 (776). Opt-in per protocol, and only after that family has been soaked: a
+# listed protocol is one you have qualified, not one this proxy vouches for. Empty by default.
+# seamless-canary-protocols = [775]
+
+
 # One identity per backend. Obtain the SHA-256 fingerprint from its certificate.
 # Membership comes from the authenticated resume, not a manually maintained member list.
 [backend-identities]

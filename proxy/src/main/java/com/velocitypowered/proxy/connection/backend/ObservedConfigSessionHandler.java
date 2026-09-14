@@ -17,6 +17,7 @@
 
 package com.velocitypowered.proxy.connection.backend;
 
+import com.velocitypowered.api.network.ProtocolVersion;
 import com.velocitypowered.proxy.connection.MinecraftSessionHandler;
 import com.velocitypowered.proxy.protocol.MinecraftPacket;
 import com.velocitypowered.proxy.protocol.packet.config.FinishedUpdatePacket;
@@ -41,7 +42,9 @@ final class ObservedConfigSessionHandler implements MinecraftSessionHandler {
 
   @Override
   public void activated() {
-    connection.configurationCapture = new SeamlessConfiguration.Capture(connection.ensureConnected().getProtocolVersion());
+    ProtocolVersion negotiated = connection.ensureConnected().getProtocolVersion();
+    connection.configurationCapture = new SeamlessConfiguration.Capture(negotiated,
+        SeamlessProtocols.eligible(connection.server, negotiated));
     SeamlessConfiguration.Baseline previous =
         connection.getPlayer() == null ? null : connection.getPlayer().seamlessBaseline();
     if (previous != null) {

@@ -37,7 +37,9 @@ import org.checkerframework.checker.nullness.qual.Nullable;
 public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> identities,
                                      SslContext tls, List<String> fallback,
                                      Map<String, List<String>> forcedHosts, Map<String, String> handoffModes,
-                                     @Nullable PairingStore pairing, Map<String, Integer> minReadyPerRegion) {
+                                     @Nullable PairingStore pairing,
+                                     Map<String, Integer> minReadyPerRegion,
+                                     Set<Integer> seamlessCanaryProtocols) {
 
   /** Keeps existing certificate-pinned configurations compatible. */
   public DiscoveryConfiguration(Set<String> groups, Map<String, Identity> identities, SslContext tls,
@@ -49,7 +51,7 @@ public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> i
   public DiscoveryConfiguration(Set<String> groups, Map<String, Identity> identities, SslContext tls,
       List<String> fallback, Map<String, List<String>> forcedHosts, Map<String, String> handoffModes,
       @Nullable PairingStore pairing) {
-    this(groups, identities, tls, fallback, forcedHosts, handoffModes, pairing, Map.of());
+    this(groups, identities, tls, fallback, forcedHosts, handoffModes, pairing, Map.of(), Set.of());
   }
 
   /**
@@ -87,6 +89,7 @@ public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> i
     forcedHosts = Map.copyOf(hosts);
     handoffModes = Map.copyOf(handoffModes);
     minReadyPerRegion = Map.copyOf(minReadyPerRegion);
+    seamlessCanaryProtocols = Set.copyOf(seamlessCanaryProtocols);
     if (!groups.containsAll(minReadyPerRegion.keySet())
         || minReadyPerRegion.values().stream().anyMatch(value -> value == null || value < 0)) {
       throw new IllegalArgumentException("min-ready-per-region must name a group and cannot be negative");
@@ -140,6 +143,10 @@ public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> i
       }
       Map<String, String> handoffModes = new HashMap<>();
       Map<String, Integer> minReadyPerRegion = new HashMap<>();
+      // Opt-in only. A protocol listed here has been qualified by its operator, not by us.
+      List<Number> canary = config.getOrElse("seamless-canary-protocols", List.<Number>of());
+      final Set<Integer> seamlessCanaryProtocols = canary.stream().map(Number::intValue)
+          .collect(java.util.stream.Collectors.toUnmodifiableSet());
       for (var groupEntry : groupConfig.valueMap().entrySet()) {
         UnmodifiableConfig settings = (UnmodifiableConfig) groupEntry.getValue();
         String mode = settings.getOrElse("handoff-mode", "off");
@@ -206,7 +213,7 @@ public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> i
         }
       }
       return java.util.Optional.of(new DiscoveryConfiguration(groups, identities, tls, fallback,
-          forcedHosts, handoffModes, pairing, minReadyPerRegion));
+          forcedHosts, handoffModes, pairing, minReadyPerRegion, seamlessCanaryProtocols));
     } catch (RuntimeException exception) {
       throw new IOException("Invalid discovery configuration: " + exception.getMessage(), exception);
     }

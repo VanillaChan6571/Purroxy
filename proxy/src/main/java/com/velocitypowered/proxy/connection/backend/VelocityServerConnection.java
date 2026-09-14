@@ -65,7 +65,7 @@ public class VelocityServerConnection implements MinecraftConnectionAssociation,
   private final VelocityRegisteredServer registeredServer;
   private final @Nullable VelocityRegisteredServer previousServer;
   private final ConnectedPlayer proxyPlayer;
-  private final VelocityServer server;
+  final VelocityServer server;
   private @Nullable MinecraftConnection connection;
   private boolean hasCompletedJoin = false;
   private boolean clientLoaded = false; // 1.21.4+
@@ -77,7 +77,8 @@ public class VelocityServerConnection implements MinecraftConnectionAssociation,
   private BackendConnectionPhase connectionPhase = BackendConnectionPhases.UNKNOWN;
   private final Map<Long, Long> pendingPings = new HashMap<>();
   private @MonotonicNonNull Integer entityId;
-  SeamlessConfiguration.Capture configurationCapture = new SeamlessConfiguration.Capture(ProtocolVersion.UNKNOWN);
+  SeamlessConfiguration.Capture configurationCapture =
+      new SeamlessConfiguration.Capture(ProtocolVersion.UNKNOWN, false);
 
   /** Whether this connection negotiated configuration while its client stayed in PLAY. */
   public boolean isDetachedConfiguration() {

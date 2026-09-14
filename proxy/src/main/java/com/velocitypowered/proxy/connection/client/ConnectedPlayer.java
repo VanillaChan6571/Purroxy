@@ -699,7 +699,8 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
 
   /** Records the JoinGame state actually installed in this client. */
   public void setSeamlessJoin(JoinGamePacket packet) {
-    this.seamlessJoinBaseline = getProtocolVersion() == ProtocolVersion.MINECRAFT_26_2
+    this.seamlessJoinBaseline = com.velocitypowered.proxy.connection.backend.SeamlessProtocols
+        .eligible(server, getProtocolVersion())
         ? SeamlessConfiguration.captureJoin(packet, getProtocolVersion())
         : null;
   }

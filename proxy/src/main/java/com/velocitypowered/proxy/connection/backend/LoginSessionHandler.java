@@ -324,19 +324,25 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
     }
     // Protocol first: configuration capture is itself gated to 26.2, so an older client always
     // lacks a baseline too. Reporting that would name the symptom and hide the cause.
-    if (player.getProtocolVersion() != ProtocolVersion.MINECRAFT_26_2) {
-      return "this client is on an older protocol than the 26.2 seamless path supports";
+    if (!SeamlessProtocols.eligible(server, player.getProtocolVersion())) {
+      return "protocol " + player.getProtocolVersion().getProtocol()
+          + " is not enabled for seamless switching";
     }
     int original = originalProtocol(player);
-    if (original != ProtocolVersion.MINECRAFT_26_2.getProtocol()) {
-      return original < 0 ? "the client's original protocol could not be verified"
-          : "the client is translated rather than native 26.2";
+    if (original < 0) {
+      return "the client's original protocol could not be verified";
+    }
+    if (original != player.getProtocolVersion().getProtocol()) {
+      // A translated connection is a different thing from a native one at the same number,
+      // and only the native form has been qualified.
+      return "the client is translated from protocol " + original + " rather than native";
     }
     if (baseline == null) {
       return "this client has no captured configuration to compare the destination against";
     }
-    if (backend.getProtocolVersion() != ProtocolVersion.MINECRAFT_26_2) {
-      return "the destination is not on 26.2";
+    if (!SeamlessProtocols.eligible(server, backend.getProtocolVersion())) {
+      return "the destination link negotiated protocol "
+          + backend.getProtocolVersion().getProtocol() + ", which is not enabled";
     }
     if (player.getConnection().getType()
         != com.velocitypowered.proxy.connection.ConnectionTypes.VANILLA) {

@@ -297,6 +297,18 @@ public final class DiscoveryService implements AutoCloseable {
     return handoff != null && handoff.seamlessArrivalApproved(player);
   }
 
+  /**
+   * Client protocols an operator has opted into for seamless switching beyond the qualified
+   * one. Resolved to versions this proxy actually speaks; an unknown number is ignored rather
+   * than allowed, so a typo cannot widen eligibility.
+   */
+  public Set<com.velocitypowered.api.network.ProtocolVersion> seamlessCanaryProtocols() {
+    return configuration.seamlessCanaryProtocols().stream()
+        .map(com.velocitypowered.api.network.ProtocolVersion::getProtocolVersion)
+        .filter(version -> version != com.velocitypowered.api.network.ProtocolVersion.UNKNOWN)
+        .collect(java.util.stream.Collectors.toUnmodifiableSet());
+  }
+
   /** Whether the durable record still names this exact transfer's destination as the owner. */
   public boolean ownsCommittedTransfer(UUID player, HandoffCoordinator.@Nullable Ticket ticket) {
     return handoff != null && handoff.ownsCommittedTransfer(player, ticket);

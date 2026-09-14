@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2026 Velocity Contributors x Neko Network
+ * Copyright (C) 2026 Velocity Contributors
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -58,8 +58,12 @@ final class CanonicalRegistry {
    * <p>Empty is not a failure to report: it means this payload can only be compared byte for byte.
    */
   static Optional<byte[]> digest(byte[] payload, ProtocolVersion protocol) {
-    if (protocol.lessThan(ProtocolVersion.MINECRAFT_1_20_2)) {
-      // Older protocols name the root tag, so the shape below does not describe them.
+    if (protocol.lessThan(ProtocolVersion.MINECRAFT_1_20_5)) {
+      // The shape walked below - identifier, entry count, then a flag and NBT per entry - is the
+      // per-registry sync introduced in 1.20.5. Before it a single packet carried the whole
+      // registry set as one named-root tag, which this walk would either fail on or, worse, read
+      // far enough into to produce a digest that means nothing. Refusing leaves those protocols
+      // compared byte for byte, which is the honest answer for a shape this cannot describe.
       return Optional.empty();
     }
     ByteBuf in = Unpooled.wrappedBuffer(payload);

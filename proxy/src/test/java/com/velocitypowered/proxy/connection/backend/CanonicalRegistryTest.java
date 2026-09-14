@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2026 Velocity Contributors x Neko Network
+ * Copyright (C) 2026 Velocity Contributors
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -30,6 +30,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * The canonical registry fingerprint must ignore compound-key order and absolutely nothing else.
@@ -269,10 +272,25 @@ class CanonicalRegistryTest {
     assertTrue(digest(extended).isEmpty());
   }
 
-  @Test
-  void olderProtocolIsRefusedBecauseItsRootTagIsNamed() {
-    assertTrue(CanonicalRegistry.digest(single(compound("a", "1")),
-        ProtocolVersion.MINECRAFT_1_19_4).isEmpty());
+  @ParameterizedTest
+  @EnumSource(value = ProtocolVersion.class,
+      names = {"MINECRAFT_1_19_4", "MINECRAFT_1_20", "MINECRAFT_1_20_2", "MINECRAFT_1_20_3"})
+  void protocolsBeforeThePerRegistrySyncAreRefused(ProtocolVersion protocol) {
+    // 1.20.2 and 1.20.3 do have a configuration phase, but their registry sync is one packet
+    // carrying every registry as a named root tag, not the identifier-and-entries shape walked
+    // here. Reading one as the other would produce a digest that means nothing, so refuse and
+    // leave the caller comparing raw bytes.
+    assertTrue(CanonicalRegistry.digest(single(compound("a", "1")), protocol).isEmpty());
+  }
+
+  @ParameterizedTest
+  @MethodSource("com.velocitypowered.proxy.connection.backend.SeamlessProtocolsTest#band")
+  void everyEligibleProtocolCanonicalisesTheSamePayloadTheSameWay(ProtocolVersion protocol) {
+    // The shape is identical from 1.20.5 up, so a payload's canonical digest must not depend on
+    // which protocol in the band it was read at - otherwise two hubs could never match.
+    byte[] payload = single(compound("b", "2", "a", "1"));
+    assertArrayEquals(digest(payload).orElseThrow(),
+        CanonicalRegistry.digest(payload, protocol).orElseThrow());
   }
 
   @Test

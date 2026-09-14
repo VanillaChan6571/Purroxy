@@ -147,9 +147,17 @@ public record DiscoveryConfiguration(Set<String> groups, Map<String, Identity> i
       Map<String, String> handoffModes = new HashMap<>();
       Map<String, Integer> minReadyPerRegion = new HashMap<>();
       // Opt-in only. A protocol listed here has been qualified by its operator, not by us.
-      List<Number> canary = config.getOrElse("seamless-canary-protocols", List.<Number>of());
-      final Set<Integer> seamlessCanaryProtocols = canary.stream().map(Number::intValue)
-          .collect(java.util.stream.Collectors.toUnmodifiableSet());
+      List<?> canary = config.getOrElse("seamless-canary-protocols", List.of());
+      final Set<Integer> seamlessCanaryProtocols = new java.util.HashSet<>();
+      for (Object protocol : canary) {
+        if (!(protocol instanceof Number number)) {
+          // Named rather than thrown as a cast failure: the entry is the operator's typo, and the
+          // message has to be the one thing that tells them which entry to fix.
+          throw new IllegalArgumentException(
+              "seamless-canary-protocols must contain protocol numbers; found \"" + protocol + "\"");
+        }
+        seamlessCanaryProtocols.add(number.intValue());
+      }
       for (var groupEntry : groupConfig.valueMap().entrySet()) {
         UnmodifiableConfig settings = (UnmodifiableConfig) groupEntry.getValue();
         String mode = settings.getOrElse("handoff-mode", "off");

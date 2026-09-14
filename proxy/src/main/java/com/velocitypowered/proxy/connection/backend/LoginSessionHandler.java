@@ -335,8 +335,9 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
     if (!(player.getConnection().getActiveSessionHandler() instanceof ClientPlaySessionHandler)) {
       return "the client is not in play";
     }
-    // Protocol first: configuration capture is itself gated to 26.2, so an older client always
-    // lacks a baseline too. Reporting that would name the symptom and hide the cause.
+    // Protocol first: configuration capture is gated on the same policy, so a client at an
+    // unenabled protocol always lacks a baseline too. Reporting that would name the symptom and
+    // hide the cause.
     if (!SeamlessProtocols.eligible(server, player.getProtocolVersion())) {
       return "protocol " + player.getProtocolVersion().getProtocol()
           + " is not enabled for seamless switching";

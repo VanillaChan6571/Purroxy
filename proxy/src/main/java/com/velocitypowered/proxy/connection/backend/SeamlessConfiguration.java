@@ -346,8 +346,9 @@ public final class SeamlessConfiguration {
     if (!(packet instanceof RegistrySyncPacket)) {
       return "";
     }
-    // Native 26.2 encodes the registry identifier before the entry list and its NBT.
-    // Read only that bounded prefix, leaving the original deferred packet untouched.
+    // From 1.20.5 a registry sync encodes the registry identifier before the entry list and its
+    // NBT. Read only that bounded prefix, leaving the original deferred packet untouched. Older
+    // protocols are never eligible, so the earlier whole-registry shape cannot reach this.
     ByteBuf buffer = Unpooled.wrappedBuffer(payload);
     try {
       String registry = ProtocolUtils.readString(buffer, 256);

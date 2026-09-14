@@ -51,6 +51,8 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.InOrder;
 
 class SeamlessConfigurationTest {
@@ -367,11 +369,21 @@ class SeamlessConfigurationTest {
     return baseline(new TagsUpdatePacket());
   }
 
+  /** The same negotiation taken at some other protocol, for the version-spanning cases below. */
+  static SeamlessConfiguration.Baseline baseline(ProtocolVersion version) {
+    return baseline(new TagsUpdatePacket(), version);
+  }
+
   private static SeamlessConfiguration.Baseline baseline(TagsUpdatePacket tags) {
-    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(VERSION, true);
-    capture.observe(packs());
-    capture.select(packs());
-    RegistrySyncPacket packet = registry(1);
+    return baseline(tags, VERSION);
+  }
+
+  private static SeamlessConfiguration.Baseline baseline(TagsUpdatePacket tags,
+      ProtocolVersion version) {
+    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(version, true);
+    capture.observe(packs(version));
+    capture.select(packs(version));
+    RegistrySyncPacket packet = registry(1, version);
     try {
       capture.observe(packet);
     } finally {
@@ -454,10 +466,14 @@ class SeamlessConfigurationTest {
   }
 
   static KnownPacksPacket packs() {
+    return packs(VERSION);
+  }
+
+  static KnownPacksPacket packs(ProtocolVersion version) {
     KnownPacksPacket packet = new KnownPacksPacket();
     ByteBuf bytes = Unpooled.wrappedBuffer(new byte[] {0});
     try {
-      packet.decode(bytes, ProtocolUtils.Direction.SERVERBOUND, VERSION);
+      packet.decode(bytes, ProtocolUtils.Direction.SERVERBOUND, version);
       return packet;
     } finally {
       bytes.release();
@@ -465,10 +481,14 @@ class SeamlessConfigurationTest {
   }
 
   private static RegistrySyncPacket registry(int value) {
+    return registry(value, VERSION);
+  }
+
+  private static RegistrySyncPacket registry(int value, ProtocolVersion version) {
     RegistrySyncPacket packet = new RegistrySyncPacket();
     ByteBuf bytes = Unpooled.wrappedBuffer(new byte[] {(byte) value});
     try {
-      packet.decode(bytes, ProtocolUtils.Direction.CLIENTBOUND, VERSION);
+      packet.decode(bytes, ProtocolUtils.Direction.CLIENTBOUND, version);
       return packet;
     } finally {
       bytes.release();
@@ -518,5 +538,43 @@ class SeamlessConfigurationTest {
     } finally {
       bytes.release();
     }
+  }
+
+  @ParameterizedTest
+  @MethodSource("com.velocitypowered.proxy.connection.backend.SeamlessProtocolsTest#band")
+  void negotiationCapturedAtAnyEligibleProtocolReplaysAgainstItself(ProtocolVersion version) {
+    // The comparison is meant to be version-neutral within the band it admits. This is the whole
+    // of that claim: capture at the protocol, replay the same exchange, and expect a match.
+    SeamlessConfiguration negotiation =
+        new SeamlessConfiguration(baseline(version), version);
+    KnownPacksPacket selected =
+        (KnownPacksPacket) negotiation.accept(packs(version)).orElseThrow();
+    assertArrayEquals(new byte[] {0},
+        SeamlessConfiguration.encode(selected, ProtocolUtils.Direction.SERVERBOUND, version));
+    RegistrySyncPacket sync = registry(1, version);
+    try {
+      assertTrue(negotiation.accept(sync).isEmpty());
+    } finally {
+      sync.release();
+    }
+    assertTrue(negotiation.accept(new ActiveFeaturesPacket()).isEmpty());
+    assertTrue(negotiation.accept(new TagsUpdatePacket()).isEmpty());
+    negotiation.accept(FinishedUpdatePacket.INSTANCE);
+    assertTrue(negotiation.complete());
+  }
+
+  @ParameterizedTest
+  @MethodSource("com.velocitypowered.proxy.connection.backend.SeamlessProtocolsTest#band")
+  void differentRegistryIsRefusedAtEveryEligibleProtocol(ProtocolVersion version) {
+    SeamlessConfiguration negotiation =
+        new SeamlessConfiguration(baseline(version), version);
+    negotiation.accept(packs(version));
+    RegistrySyncPacket sync = registry(2, version);
+    try {
+      assertThrows(IllegalStateException.class, () -> negotiation.accept(sync));
+    } finally {
+      sync.release();
+    }
+    assertFalse(negotiation.complete());
   }
 }

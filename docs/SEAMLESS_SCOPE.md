@@ -56,17 +56,29 @@ code.
 | `ClientPlaySessionHandler.handleBackendJoinGame` | Skips `JoinGame`/`Respawn` only when the destination took the detached path and both its entity ID and remaining JoinGame state match what the client already holds. |
 | `HandoffCoordinator` | Carries `requestedEntityId` on `stage`, records what the destination reserved, and records `trackedEntities` from the fence reply. |
 
-The whole proxy suite is 281 tests, 0 failures on JDK 25.0.3. The reset-skip predicate,
-JoinGame equivalence, visible fallback and pre-JoinGame arrival approval now have direct tests.
+The whole proxy suite is 317 tests, 0 failures on JDK 25.0.3. The reset-skip predicate,
+JoinGame equivalence, visible fallback, pre-JoinGame arrival approval, committed-owner recovery
+and the canonical registry comparison all have direct tests.
 
-Two hard limits are baked in:
+Two limits shape what can ever match:
 
-- `Capture` is version-gated to **exactly protocol 776 (26.2)**
-  (`SeamlessConfiguration.java:80`, and again at `:168` for replay). Any other client version can never
-  produce a baseline.
+- Eligibility is decided in one place, `SeamlessProtocols`. Protocol 776 (26.2) is qualified and
+  always eligible. Any other protocol is a canary: off unless an operator lists it in
+  `seamless-canary-protocols`, and eligible only because they have qualified it themselves.
+  Protocol 775 (26.1.x) has been taken through a live two-hub switch in both directions.
 - Equivalence is **byte-identity of the wire encoding**, including the `mc:brand`
-  plugin message. Two backends running different server software or different
-  patch releases can never match.
+  plugin message, with one deliberate exception. For `RegistrySyncPacket` the acceptance check
+  is a canonical SHA-256 that ignores NBT compound-key order and nothing else: registry
+  identifier, entry count and order, data-presence flags, tag types and values, list order and
+  array contents all still have to match exactly. A payload that cannot be canonicalised safely
+  - malformed, truncated, duplicate-keyed, or of an unknown tag type - produces no canonical
+  digest at all and so falls back to byte identity. Two backends running different server
+  software or different patch releases still cannot match.
+
+  This exception exists because two servers were observed describing `minecraft:worldgen/biome`
+  with identical values in a different key order, which no client can observe across a seamless
+  switch: none of that configuration is forwarded, and a registry's numeric ids come from entry
+  order rather than from key order inside an entry.
 
 The capture cost is real but no longer wasted: every backend CONFIG packet is SHA-256
 hashed and fully copied, and registry sync payloads are the largest packets in the
@@ -125,9 +137,14 @@ dropped in a pack is silently incompatible.
 This network runs ViaVersion 5.12.0, ViaBackwards 5.11.0, ViaRewind 4.1.3 and
 Legacy-Support.
 
-- Via rewrites the handshake protocol version to the backend's. Purroxy now detects an
-  installed ViaVersion plugin and reflectively asks its API for the player's original
-  protocol. Only original protocol 776 is eligible; unavailable inspection fails closed.
+- **Corrected 2026-09-14 by measurement.** This document previously stated that Via rewrites
+  the handshake protocol version to the backend's, so that the proxy sees the backend version.
+  It does not. With a 26.1.2 client the proxy logs client protocol 775, proxy-negotiated 775
+  and destination link 775: Velocity negotiates the client's own protocol throughout, and Via
+  translates on the backend link. Purroxy still asks Via's API for the original protocol and
+  requires it to equal what was negotiated, so a translated connection is never taken for a
+  native one; unavailable inspection fails closed. Eligibility is no longer limited to 776 -
+  see `SeamlessProtocols` and `seamless-canary-protocols`.
 - If registries ever diverge and Via is translating a client newer than the
   backend link, **ViaVersion sends `START_CONFIGURATION` to the client itself**.
   The proxy cannot promise "the client never sees a reconfiguration" while a
@@ -233,11 +250,14 @@ per group at any time. Retreat rather than push through if any of these hold:
 
 ## What cannot be known without a live client
 
-Unchanged by the implementation. Everything below is still open.
+Partly answered on 2026-09-14 by a live two-hub network. The rest is still open.
 
-- Whether a real client tolerates PLAY-preserving switching at all in practice. No
-  public implementation exists to learn from.
-- Whether Via's per-connection state survives. Only testable with real legacy clients.
+- ~~Whether a real client tolerates PLAY-preserving switching at all in practice.~~ **Answered:**
+  native 26.2 and translated 26.1.2 clients both switch hubs with no JoinGame, no Respawn, no
+  reconfiguration and no loading screen, in both directions.
+- ~~Whether Via's per-connection state survives.~~ **Answered for 775:** a translated 26.1.2
+  client completes the detached negotiation and keeps its world across repeated switches. Not
+  answered for any older family, and ViaBackwards' emulated config phase remains the risk.
 - The true divergence rate between the hubs as datapacks and builds drift.
 
 This repository's tests cannot stand up a `VelocityServer`, let alone a Minecraft
@@ -245,8 +265,9 @@ client. Everything above stage 1 is unverifiable here.
 
 ## Provenance
 
-Updated 2026-09-11 against `ab25cb90` (Purroxy) and `b8e5d2f9d` (Nekopur); resolved
-blockers were re-checked against the source rather than against commit messages.
+Updated 2026-09-14 against `7122ac65` (Purroxy) and `be2bf4934` (Nekopur). Resolved blockers
+were re-checked against the source rather than against commit messages, and the claims marked
+answered above were observed on the live network rather than reasoned from the code.
 
 Originally produced by a six-dimension investigation with an adversarial verification pass.
 `existing-code` was reviewed and found **sound**. `velocity-switch-path` was

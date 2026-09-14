@@ -19,13 +19,19 @@ matching map identity and revision. Purroxy must have durably committed this
 player's handoff to that destination. Discovery registration and a matching
 diagnostic log alone do not meet these requirements.
 
-Both the client and backend connection must use native 26.2, the client connection
-must be classified as vanilla and still in PLAY, the source must remain active,
-and a complete baseline from a successful normal configuration must exist.
-Other connections use the existing normal path. When ViaVersion is installed, Purroxy
-also asks its API for the player's original protocol and requires native protocol 776;
-if that inspection is unavailable or fails, seamless mode fails closed. Other packet
-plugins are still outside this qualification and native clients must be tested first.
+Both the client and backend connection must negotiate a protocol that `SeamlessProtocols`
+treats as eligible - 776 (26.2) always, plus anything an operator has listed in
+`seamless-canary-protocols` - the client connection must be classified as vanilla and still in
+PLAY, the source must remain active, and a complete baseline from a successful normal
+configuration must exist. Other connections use the existing normal path.
+
+When ViaVersion is installed, Purroxy asks its API for the player's original protocol and
+requires it to equal what the proxy negotiated, so a translated connection is never mistaken
+for a native one at the same number. If that inspection is unavailable or fails, seamless mode
+fails closed. Every refusal is logged with the reason and all three protocols - what the client
+speaks, what the proxy negotiated, and what the destination link negotiated - because those are
+not always the same number and the difference is what locates a translator. Other packet
+plugins remain outside this qualification.
 
 ## Packet flow and fallback
 

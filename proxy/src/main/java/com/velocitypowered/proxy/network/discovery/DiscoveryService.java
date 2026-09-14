@@ -418,15 +418,19 @@ public final class DiscoveryService implements AutoCloseable {
     observeConnections();
     if (handoff != null && handoff.recoveryOwner(player.getUniqueId()).isPresent()) {
       String owner = handoff.recoveryOwner(player.getUniqueId()).orElseThrow();
-      if (excluded.contains(owner)) {
-        return Optional.empty();
+      RegisteredServer target = excluded.contains(owner) ? null
+          : server.getServer(owner).orElse(null);
+      if (target != null) {
+        Optional<Admission> admission = begin(player.getUniqueId(), target);
+        if (admission.isPresent()) {
+          return Optional.of(target);
+        }
       }
-      RegisteredServer target = server.getServer(owner).orElse(null);
-      if (target == null) {
-        return Optional.empty();
-      }
-      Optional<Admission> admission = begin(player.getUniqueId(), target);
-      return admission.isPresent() ? Optional.of(target) : Optional.empty();
+      // The committed owner cannot take this player: it is the server they were just dropped from,
+      // it is gone, or it has no room. Pinning them to it now can only end in a disconnect, so fall
+      // through to ordinary group selection rather than reporting that nowhere will have them.
+      logger.info("Committed owner {} cannot take {} right now; falling back within the group.",
+          owner, player.getUsername());
     }
     var destinations = configuration.forcedHosts().getOrDefault(
         host.toLowerCase(java.util.Locale.ROOT), configuration.fallback());

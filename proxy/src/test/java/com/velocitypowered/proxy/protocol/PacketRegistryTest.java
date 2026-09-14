@@ -36,8 +36,13 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.velocitypowered.api.network.ProtocolVersion;
+import com.velocitypowered.proxy.connection.backend.SeamlessProtocols;
 import com.velocitypowered.proxy.protocol.packet.HandshakePacket;
+import com.velocitypowered.proxy.protocol.packet.RemoveEntitiesPacket;
+import com.velocitypowered.proxy.protocol.packet.SetObjectivePacket;
+import com.velocitypowered.proxy.protocol.packet.SetPlayerTeamPacket;
 import com.velocitypowered.proxy.protocol.packet.StatusPingPacket;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class PacketRegistryTest {
@@ -155,5 +160,31 @@ class PacketRegistryTest {
         registry.getProtocolRegistry(MINECRAFT_1_13).createPacket(0x02).getClass());
     assertEquals(HandshakePacket.class,
         registry.getProtocolRegistry(MINECRAFT_1_14_2).createPacket(0x02).getClass());
+  }
+
+  @Test
+  void everySeamlessProtocolCanEncodeTheSourceStateTeardown() {
+    // ClientPlaySessionHandler.clearSourceState writes these three with the client still in PLAY,
+    // because a seamless switch sends no JoinGame or Respawn to rebuild the entity table and
+    // scoreboard. A protocol that SeamlessProtocols admits but that has no id here does not
+    // degrade quietly - it throws an encoder exception and drops the player mid-switch. So the
+    // eligible band and these registrations have to be kept in step, and this is what says so.
+    List<MinecraftPacket> teardown = List.of(
+        new RemoveEntitiesPacket(new int[] {1}),
+        new SetObjectivePacket("objective"),
+        new SetPlayerTeamPacket("team"));
+    for (ProtocolVersion version : ProtocolVersion.SUPPORTED_VERSIONS) {
+      if (!SeamlessProtocols.canaryable(version)) {
+        continue;
+      }
+      for (MinecraftPacket packet : teardown) {
+        assertDoesNotThrow(
+            () -> StateRegistry.PLAY
+                .getProtocolRegistry(ProtocolUtils.Direction.CLIENTBOUND, version)
+                .getPacketId(packet),
+            packet.getClass().getSimpleName() + " has no clientbound PLAY id at " + version
+                + " (protocol " + version.getProtocol() + ")");
+      }
+    }
   }
 }

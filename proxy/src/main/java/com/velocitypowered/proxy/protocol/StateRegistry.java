@@ -600,16 +600,32 @@ public enum StateRegistry {
       clientbound.register(
           RemoveEntitiesPacket.class,
           RemoveEntitiesPacket::new,
-          // Encode-only, and only where a seamless handoff can happen. Older clients are reset by
-          // JoinGame and Respawn, which clear the entity table on their own.
+          // Encode-only, and only where a seamless handoff can happen - which is now the whole
+          // band SeamlessProtocols admits, not just 26.1 up. Below that floor a client is reset by
+          // JoinGame and Respawn, which clear the entity table on their own. These three must stay
+          // mapped across the entire band: the seamless path writes them with the client still in
+          // PLAY, so a missing id is not a silent no-op but an encoder exception that drops the
+          // player mid-switch.
+          map(0x42, MINECRAFT_1_20_5, true),
+          map(0x47, MINECRAFT_1_21_2, true),
+          map(0x46, MINECRAFT_1_21_5, true),
+          map(0x4B, MINECRAFT_1_21_9, true),
           map(0x4D, MINECRAFT_26_1, true));
       clientbound.register(
           SetObjectivePacket.class,
           SetObjectivePacket::new,
+          map(0x5E, MINECRAFT_1_20_5, true),
+          map(0x64, MINECRAFT_1_21_2, true),
+          map(0x63, MINECRAFT_1_21_5, true),
+          map(0x68, MINECRAFT_1_21_9, true),
           map(0x6A, MINECRAFT_26_1, true));
       clientbound.register(
           SetPlayerTeamPacket.class,
           SetPlayerTeamPacket::new,
+          map(0x60, MINECRAFT_1_20_5, true),
+          map(0x67, MINECRAFT_1_21_2, true),
+          map(0x66, MINECRAFT_1_21_5, true),
+          map(0x6B, MINECRAFT_1_21_9, true),
           map(0x6D, MINECRAFT_26_1, true));
       clientbound.register(
           RemoveResourcePackPacket.class,

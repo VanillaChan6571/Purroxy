@@ -64,8 +64,8 @@ class RegistryPayloadDiffTest {
   @Test
   void decodesEveryEntryWithItsIdentifierAndPresenceFlag() {
     List<RegistryPayloadDiff.Entry> entries =
-        RegistryPayloadDiff.entries(payload(List.of("minecraft:plains", "minecraft:desert"), 1),
-            VERSION);
+        RegistryPayloadDiff.decode(payload(List.of("minecraft:plains", "minecraft:desert"), 1),
+            VERSION).entries();
     assertEquals(2, entries.size());
     assertEquals("minecraft:plains", entries.get(0).id());
     assertEquals("minecraft:desert", entries.get(1).id());
@@ -89,7 +89,7 @@ class RegistryPayloadDiffTest {
     byte[] expected = payload(List.of("minecraft:plains", "minecraft:desert"), 1);
     byte[] received = payload(List.of("minecraft:plains", "minecraft:desert"), 2);
     String report = RegistryPayloadDiff.describe(expected, received, VERSION, 16);
-    assertTrue(report.contains("entry data differs"), report);
+    assertTrue(report.contains("VALUES differ"), report);
     assertTrue(report.contains("minecraft:plains"), report);
     assertTrue(!report.contains("ORDER differs"), report);
   }
@@ -100,6 +100,7 @@ class RegistryPayloadDiffTest {
     byte[] received = payload(List.of("minecraft:plains"), 2);
     String report = RegistryPayloadDiff.describe(expected, received, VERSION, 16);
     // The entry is a lead; the field is the cause, and the only thing an operator can act on.
+    assertTrue(report.contains("VALUES differ"), report);
     assertTrue(report.contains("minecraft:plains at [temperature]"), report);
   }
 
@@ -119,7 +120,8 @@ class RegistryPayloadDiffTest {
     String report = RegistryPayloadDiff.describe(expected, received, VERSION, 16);
     // A diagnosis must never become a second fault on a path that is already failing.
     assertTrue(report.contains("[1]"), report);
-    assertTrue(report.contains("could not be decoded"), report);
+    assertTrue(report.contains("INCOMPLETE decode"), report);
+    assertTrue(report.contains("order NOT verified"), report);
   }
 
   @Test
@@ -130,5 +132,64 @@ class RegistryPayloadDiffTest {
       received[index] = 1;
     }
     assertEquals(4, RegistryPayloadDiff.ranges(expected, received, 4).size());
+  }
+
+  @Test
+  void semanticallyEqualEntriesAreNotReportedAsValueChanges() {
+    // Same fields, same values, written in a different key order: the bytes differ, the meaning
+    // does not, and this is the only case a comparison could ever safely tolerate.
+    byte[] expected = entry(compound("a", 1, "b", 2));
+    byte[] received = entry(compound("b", 2, "a", 1));
+    String report = RegistryPayloadDiff.describe(expected, received, VERSION, 16);
+    assertTrue(report.contains("serialization only"), report);
+    assertTrue(!report.contains("VALUES differ"), report);
+  }
+
+  @Test
+  void partialDecodeRefusesToClaimOrderMatches() {
+    byte[] good = payload(List.of("minecraft:plains", "minecraft:desert"), 1);
+    byte[] truncated = java.util.Arrays.copyOf(good, good.length - 12);
+    String report = RegistryPayloadDiff.describe(good, truncated, VERSION, 16);
+    // Half a parse can prove a difference but never prove an absence of one.
+    assertTrue(report.contains("INCOMPLETE decode"), report);
+    assertTrue(report.contains("order NOT verified"), report);
+    assertTrue(!report.contains("no entry difference found"), report);
+  }
+
+  /**
+   * Writes a compound by hand with its keys in the given order. Adventure's builder normalises key
+   * order, so a serialization-only difference cannot be produced through it.
+   */
+  private static byte[] compound(String first, int firstValue, String second, int secondValue) {
+    ByteBuf buffer = Unpooled.buffer();
+    try {
+      buffer.writeByte(10); // TAG_Compound
+      for (String[] pair : new String[][] {{first, String.valueOf(firstValue)},
+          {second, String.valueOf(secondValue)}}) {
+        buffer.writeByte(3); // TAG_Int
+        buffer.writeShort(pair[0].length());
+        buffer.writeBytes(pair[0].getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        buffer.writeInt(Integer.parseInt(pair[1]));
+      }
+      buffer.writeByte(0); // TAG_End
+      return ByteBufUtil.getBytes(buffer);
+    } finally {
+      buffer.release();
+    }
+  }
+
+  /** One entry carrying the given raw NBT bytes, so NBT-level outcomes can be built directly. */
+  private static byte[] entry(byte[] tag) {
+    ByteBuf buffer = Unpooled.buffer();
+    try {
+      ProtocolUtils.writeString(buffer, SeamlessCaptures.REGISTRY);
+      ProtocolUtils.writeVarInt(buffer, 1);
+      ProtocolUtils.writeString(buffer, "minecraft:plains");
+      buffer.writeBoolean(true);
+      buffer.writeBytes(tag);
+      return ByteBufUtil.getBytes(buffer);
+    } finally {
+      buffer.release();
+    }
   }
 }

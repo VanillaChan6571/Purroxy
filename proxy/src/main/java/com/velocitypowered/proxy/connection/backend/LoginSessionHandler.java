@@ -311,8 +311,10 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
       final java.util.UUID captured = player.getUniqueId();
       final String destination = serverConn.getServerInfo().getName();
       final ProtocolVersion negotiated = backend.getProtocolVersion();
+      final String instance = server.getDiscovery().backendInstance(destination);
       detached.sink((registry, payload, baseline1) -> server.getDiscovery().captures()
-          .mismatch(captured, registry, payload, destination, negotiated, "detached", 1));
+          .mismatch(captured, registry, payload, destination, instance, negotiated,
+              "detached", 1));
     }
     backend.setActiveSessionHandler(StateRegistry.CONFIG, detached);
     if (player.getClientSettingsPacket() != null) {

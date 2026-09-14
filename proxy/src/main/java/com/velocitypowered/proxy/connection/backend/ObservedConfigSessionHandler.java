@@ -51,9 +51,10 @@ final class ObservedConfigSessionHandler implements MinecraftSessionHandler {
             .selects(connection.getPlayer().getUniqueId())) {
       final java.util.UUID player = connection.getPlayer().getUniqueId();
       final String backend = connection.getServerInfo().getName();
+      final String instance = connection.server.getDiscovery().backendInstance(backend);
       connection.configurationCapture.sink((registry, payload, baseline) ->
           connection.server.getDiscovery().captures().baseline(player, registry, payload,
-              backend, negotiated, "baseline", 0));
+              backend, instance, negotiated, "baseline", 0));
     }
     SeamlessConfiguration.Baseline previous =
         connection.getPlayer() == null ? null : connection.getPlayer().seamlessBaseline();

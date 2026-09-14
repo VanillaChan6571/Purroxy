@@ -45,11 +45,14 @@ public final class SeamlessCaptures {
   static final int MAX_BYTES = 512 * 1024;
 
   /** A retained payload with everything needed to say which side of which attempt it came from. */
-  record Capture(byte[] payload, String backend, ProtocolVersion protocol, String transfer,
-                 int attempt) {
+  record Capture(byte[] payload, String backend, String instance, ProtocolVersion protocol,
+                 String transfer, int attempt, java.time.Instant at) {
     String describe() {
-      return backend + " at protocol " + protocol.getProtocol() + ", transfer " + transfer
-          + ", attempt " + attempt + ", " + payload.length + " bytes";
+      // The instance distinguishes one backend incarnation from the next, so a payload that
+      // changed after a restart is not mistaken for one that changed between connections.
+      return backend + " (instance " + instance + ") at protocol " + protocol.getProtocol()
+          + ", transfer " + transfer + ", attempt " + attempt + ", " + payload.length
+          + " bytes, captured " + at;
     }
   }
 
@@ -74,19 +77,20 @@ public final class SeamlessCaptures {
    * Retains the baseline payload this client was actually configured with. Replaces any previous
    * capture for the player, so only the most recent configuration is ever held.
    */
-  void baseline(UUID player, String registry, byte[] payload, String backend,
+  void baseline(UUID player, String registry, byte[] payload, String backend, String instance,
       ProtocolVersion protocol, String transfer, int attempt) {
     if (!selects(player) || !REGISTRY.equals(registry) || payload.length > MAX_BYTES) {
       return;
     }
-    baselines.put(player, new Capture(payload.clone(), backend, protocol, transfer, attempt));
+    baselines.put(player, new Capture(payload.clone(), backend, instance, protocol, transfer,
+        attempt, java.time.Instant.now()));
   }
 
   /**
    * Explains a mismatch against the retained baseline, then drops it. The destination payload is
    * only ever examined here and never stored, so a mismatch costs nothing beyond this call.
    */
-  void mismatch(UUID player, String registry, byte[] payload, String backend,
+  void mismatch(UUID player, String registry, byte[] payload, String backend, String instance,
       ProtocolVersion protocol, String transfer, int attempt) {
     if (!selects(player) || !REGISTRY.equals(registry)) {
       return;
@@ -97,7 +101,8 @@ public final class SeamlessCaptures {
           player, registry);
       return;
     }
-    Capture destination = new Capture(payload, backend, protocol, transfer, attempt);
+    Capture destination = new Capture(payload, backend, instance, protocol, transfer, attempt,
+        java.time.Instant.now());
     logger.info("Seamless capture for {} on {}:\n  baseline    {}\n  destination {}\n  {}", player,
         registry, baseline.describe(), destination.describe(),
         RegistryPayloadDiff.describe(baseline.payload(), payload, protocol, 16));

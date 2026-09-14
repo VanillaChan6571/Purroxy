@@ -306,6 +306,15 @@ public final class DiscoveryService implements AutoCloseable {
     return handoff != null && handoff.seamlessArrivalApproved(player);
   }
 
+  /**
+   * Identifies the current incarnation of a backend. A restart issues a new session, so this
+   * separates "the payload changed between connections" from "the backend was replaced".
+   */
+  public synchronized String backendInstance(String name) {
+    return handoffPeer(name).map(peer -> peer.session().toString().substring(0, 8))
+        .orElse("unknown");
+  }
+
   /** The narrow, opt-in payload retention used to explain a configuration mismatch. */
   public com.velocitypowered.proxy.connection.backend.SeamlessCaptures captures() {
     return captures;

@@ -25,9 +25,12 @@ import org.junit.jupiter.api.Test;
 class ClientPlaySessionHandlerTest {
   @Test
   void skipsTheResetOnlyWhenEveryContinuityConditionMatches() {
-    assertTrue(ClientPlaySessionHandler.canKeepClientPlayState(true, 42, 42, true));
-    assertFalse(ClientPlaySessionHandler.canKeepClientPlayState(false, 42, 42, true));
-    assertFalse(ClientPlaySessionHandler.canKeepClientPlayState(true, 43, 42, true));
-    assertFalse(ClientPlaySessionHandler.canKeepClientPlayState(true, 42, 42, false));
+    assertTrue(ClientPlaySessionHandler.canKeepClientPlayState(true, 42, 42, true, true));
+    assertFalse(ClientPlaySessionHandler.canKeepClientPlayState(false, 42, 42, true, true));
+    assertFalse(ClientPlaySessionHandler.canKeepClientPlayState(true, 43, 42, true, true));
+    assertFalse(ClientPlaySessionHandler.canKeepClientPlayState(true, 42, 42, false, true));
+    // Everything else can match and the client still must be reset: keeping it in PLAY keeps an
+    // entity table that cannot be cleaned when what the source showed it is not known in full.
+    assertFalse(ClientPlaySessionHandler.canKeepClientPlayState(true, 42, 42, true, false));
   }
 }

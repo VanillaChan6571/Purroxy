@@ -69,6 +69,9 @@ public final class HandoffCoordinator implements AutoCloseable {
   private final java.util.Map<UUID, String[]> sourceObjectives = new ConcurrentHashMap<>();
   private final java.util.Map<UUID, String[]> sourceTeams = new ConcurrentHashMap<>();
   private final java.util.Map<UUID, Ticket> pendingReleases = new ConcurrentHashMap<>();
+  // Diagnostic only, wired by DiscoveryService. Null in tests and wherever discovery is absent,
+  // and every use is guarded, so nothing about the handoff depends on it being present.
+  private volatile com.velocitypowered.proxy.connection.backend.@Nullable SourceEntityLedger ledger;
   // Transfers whose destination was told to suppress its arrival sync. Only these make the
   // matching visible-arrival mark load-bearing on a fallback.
   private final java.util.Map<UUID, UUID> seamlessApprovals = new ConcurrentHashMap<>();
@@ -81,6 +84,11 @@ public final class HandoffCoordinator implements AutoCloseable {
   HandoffCoordinator(Path directory, Transport transport) throws IOException {
     this.store = new HandoffStore(directory);
     this.transport = transport;
+  }
+
+  /** Attaches the forwarded-entity ledger so a fence can be located within what the client saw. */
+  void ledger(com.velocitypowered.proxy.connection.backend.SourceEntityLedger ledger) {
+    this.ledger = ledger;
   }
 
   /** Only interrupted commits pin recovery routing; completed handoffs restore ordinary routing. */
@@ -280,21 +288,33 @@ public final class HandoffCoordinator implements AutoCloseable {
           return transfer;
         }))
         .thenCompose(transfer -> check(transfer, origin, target, valid, playerLoop))
-        .thenCompose(transfer -> call(origin, transfer, "fence").thenApply(reply -> {
-          expect(reply, transfer, "SOURCE", "FENCED");
-          if (reply.has("trackedEntities")) {
-            var reported = reply.getAsJsonArray("trackedEntities");
-            int[] ids = new int[reported.size()];
-            for (int index = 0; index < ids.length; index++) {
-              ids[index] = reported.get(index).getAsInt();
-            }
-            sourceEntities.put(transfer.player(), ids);
+        .thenCompose(transfer -> {
+          // Marked before the call rather than after it. A spawn forwarded while the fence request
+          // is still in flight is a race the snapshot cannot have caught, and reading it later as
+          // an entity that pre-dated the handoff would point the diagnosis at the wrong fault.
+          com.velocitypowered.proxy.connection.backend.SourceEntityLedger recording = this.ledger;
+          if (recording != null) {
+            recording.fenceRequested(transfer.player(), transfer.id().toString());
           }
-          readNames(reply, "trackedObjectives")
-              .ifPresent(names -> sourceObjectives.put(transfer.player(), names));
-          readNames(reply, "trackedTeams").ifPresent(names -> sourceTeams.put(transfer.player(), names));
-          return transfer;
-        }))
+          return call(origin, transfer, "fence").thenApply(reply -> {
+            expect(reply, transfer, "SOURCE", "FENCED");
+            if (reply.has("trackedEntities")) {
+              var reported = reply.getAsJsonArray("trackedEntities");
+              int[] ids = new int[reported.size()];
+              for (int index = 0; index < ids.length; index++) {
+                ids[index] = reported.get(index).getAsInt();
+              }
+              sourceEntities.put(transfer.player(), ids);
+            }
+            readNames(reply, "trackedObjectives")
+                .ifPresent(names -> sourceObjectives.put(transfer.player(), names));
+            readNames(reply, "trackedTeams").ifPresent(names -> sourceTeams.put(transfer.player(), names));
+            if (recording != null) {
+              recording.fenceReplied(transfer.player());
+            }
+            return transfer;
+          });
+        })
         .thenCompose(transfer -> check(transfer, origin, target, valid, playerLoop))
         .thenCompose(transfer -> onIo(() -> store.update(transfer.withPhase(HandoffStore.Phase.COMMITTED))))
         .thenCompose(transfer -> call(target, transfer, "commit").thenApply(reply -> {

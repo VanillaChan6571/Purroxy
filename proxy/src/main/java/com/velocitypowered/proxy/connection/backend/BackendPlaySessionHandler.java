@@ -121,6 +121,7 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
   @Override
   public void activated() {
     serverConn.getServer().addPlayer(serverConn.getPlayer());
+    startEntityLedger();
 
     MinecraftConnection serverMc = serverConn.ensureConnected();
     if (server.getConfiguration().isBungeePluginChannelEnabled()) {
@@ -186,6 +187,24 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
     } else if (packet.getAction() == BossBarPacket.REMOVE) {
       playerSessionHandler.getServerBossBars().remove(packet.getUuid());
     }
+    return false; // forward
+  }
+
+  /**
+   * Registered in PLAY from 1.21, so it is recognised by type rather than by a moving packet id.
+   * Either packet changes the configuration the client holds after its baseline was captured.
+   */
+  @Override
+  public boolean handle(
+      com.velocitypowered.proxy.protocol.packet.config.ClientboundServerLinksPacket packet) {
+    serverConn.getPlayer().setSeamlessBaseline(null);
+    return false; // forward
+  }
+
+  @Override
+  public boolean handle(
+      com.velocitypowered.proxy.protocol.packet.config.ClientboundCustomReportDetailsPacket packet) {
+    serverConn.getPlayer().setSeamlessBaseline(null);
     return false; // forward
   }
 
@@ -347,12 +366,21 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
 
   @Override
   public boolean handle(UpsertPlayerInfoPacket packet) {
+    if (packet.getActions().contains(UpsertPlayerInfoPacket.Action.ADD_PLAYER)) {
+      recordTabAdditions(packet);
+    }
     serverConn.getPlayer().getTabList().processUpdate(packet);
     return false;
   }
 
   @Override
   public boolean handle(RemovePlayerInfoPacket packet) {
+    SourceEntityLedger ledger = entityLedger();
+    if (ledger != null) {
+      for (java.util.UUID profile : packet.getProfilesToRemove()) {
+        ledger.tabRemoved(serverConn.getPlayer().getUniqueId(), profile);
+      }
+    }
     serverConn.getPlayer().getTabList().processRemove(packet);
     return false;
   }
@@ -466,13 +494,110 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
     }
   }
 
+  private void recordTabAdditions(UpsertPlayerInfoPacket packet) {
+    SourceEntityLedger ledger = entityLedger();
+    if (ledger == null) {
+      return;
+    }
+    for (UpsertPlayerInfoPacket.Entry entry : packet.getEntries()) {
+      ledger.tabAdded(serverConn.getPlayer().getUniqueId(), entry.getProfileId(),
+          entry.getProfile() == null ? "no profile" : entry.getProfile().getName());
+    }
+  }
+
+  /** The ledger, or null where discovery is absent or has not built one. */
+  private SourceEntityLedger entityLedger() {
+    return server.getDiscovery() == null ? null : server.getDiscovery().entityLedger();
+  }
+
+  /**
+   * Begins recording the entities this backend sends the client, for the groups that can take a
+   * seamless switch. Recording starts here, at the beginning of PLAY, rather than when a handoff
+   * begins: an entity written straight to the connection by a plugin never enters the backend's
+   * tracker, so it can only be caught by having watched the whole session.
+   */
+  private void startEntityLedger() {
+    if (server.getDiscovery() == null) {
+      return;
+    }
+    String backend = serverConn.getServerInfo().getName();
+    if (!server.getDiscovery().captureSeamlessBaseline(backend)
+        || !SeamlessProtocols.eligible(server, serverConn.getPlayer().getProtocolVersion())) {
+      return;
+    }
+    SourceEntityLedger ledger = server.getDiscovery().entityLedger();
+    if (ledger == null) {
+      return;
+    }
+    ledger.start(serverConn.getPlayer().getUniqueId(), backend,
+        server.getDiscovery().backendInstance(backend),
+        serverConn.getPlayer().getProtocolVersion());
+  }
+
+  /**
+   * Records an entity this backend has just shown the client, or drops ids it has taken away.
+   *
+   * <p>Reads through a duplicate and never past the fields it needs, so the buffer forwarded below
+   * is untouched; a payload that does not parse is ignored rather than allowed to break the
+   * connection, because this is a diagnostic and must not be able to cost a player their session.
+   */
+  private void observeEntityLifecycle(ByteBuf buf) {
+    if (server.getDiscovery() == null) {
+      return;
+    }
+    SourceEntityLedger ledger = entityLedger();
+    java.util.UUID player = serverConn.getPlayer().getUniqueId();
+    if (ledger == null || !ledger.records(player)) {
+      return;
+    }
+    ProtocolVersion protocol = serverConn.getPlayer().getProtocolVersion();
+    int addEntity = SeamlessProtocols.playAddEntityId(protocol);
+    if (addEntity < 0) {
+      return;
+    }
+    int addOrb = SeamlessProtocols.playAddExperienceOrbId(protocol);
+    int removeEntities = SeamlessProtocols.playRemoveEntitiesId(protocol);
+    ByteBuf reading = buf.duplicate();
+    try {
+      int packetId = com.velocitypowered.proxy.protocol.ProtocolUtils.readVarInt(reading);
+      if (packetId == addEntity) {
+        int entityId = com.velocitypowered.proxy.protocol.ProtocolUtils.readVarInt(reading);
+        // add_entity is id then UUID. The UUID is what ties a player-type entity to the profile
+        // the client needs in its player list before it can render one.
+        java.util.UUID entity = reading.readableBytes() >= 16
+            ? new java.util.UUID(reading.readLong(), reading.readLong()) : null;
+        ledger.spawned(player, entityId, entity);
+      } else if (addOrb >= 0 && packetId == addOrb) {
+        ledger.spawned(player, com.velocitypowered.proxy.protocol.ProtocolUtils.readVarInt(reading));
+      } else if (packetId == removeEntities) {
+        int count = com.velocitypowered.proxy.protocol.ProtocolUtils.readVarInt(reading);
+        if (count < 0 || count > SourceEntityLedger.MAX_REMOVALS) {
+          return;
+        }
+        for (int index = 0; index < count; index++) {
+          ledger.removed(player, com.velocitypowered.proxy.protocol.ProtocolUtils.readVarInt(reading));
+        }
+      }
+    } catch (RuntimeException unreadable) {
+      // Not ours to interpret. The packet is still forwarded verbatim below.
+      logger.debug("Could not read an entity packet for the source ledger.", unreadable);
+    }
+  }
+
   @Override
   public void handleUnknown(ByteBuf buf) {
-    if (serverConn.getPlayer().getProtocolVersion() == ProtocolVersion.MINECRAFT_26_2) {
-      // Native 26.2 GameProtocols: PLAY tags, report details and server links can
-      // change configuration after its capture. These packets are forwarded opaquely.
-      int packetId = com.velocitypowered.proxy.protocol.ProtocolUtils.readVarInt(buf.duplicate());
-      if (packetId == 0x86 || packetId == 0x88 || packetId == 0x89) {
+    observeEntityLifecycle(buf);
+    // PLAY tags can change the configuration a baseline was captured from, and this proxy does not
+    // register the PLAY form of that packet, so it arrives here opaquely and has to be recognised
+    // by id. Report details and server links are registered from 1.21 and are caught by type
+    // instead, above. Nothing is read at all once there is no baseline left to invalidate, which
+    // is the ordinary case for every connection on every unknown packet.
+    if (serverConn.getPlayer().seamlessBaseline() != null) {
+      int updateTags = SeamlessProtocols.playUpdateTagsId(
+          serverConn.getPlayer().getProtocolVersion());
+      if (updateTags >= 0
+          && com.velocitypowered.proxy.protocol.ProtocolUtils.readVarInt(buf.duplicate())
+              == updateTags) {
         serverConn.getPlayer().setSeamlessBaseline(null);
       }
     }

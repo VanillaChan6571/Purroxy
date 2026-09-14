@@ -23,6 +23,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -255,11 +256,37 @@ class DetachedLoginTest {
   }
 
   @Test
-  void olderClientUsesNormalConfiguration() {
+  void unlistedProtocolUsesNormalConfiguration() {
+    // 26.1 can be qualified, but nobody has listed it here, so it takes the visible path.
     when(player.getProtocolVersion()).thenReturn(ProtocolVersion.MINECRAFT_26_1);
     when(play.doSwitch()).thenReturn(CompletableFuture.completedFuture(null));
     assertTrue(start() instanceof ConfigSessionHandler);
     verify(play).doSwitch();
+  }
+
+  @Test
+  void protocolBelowTheSeamlessFloorUsesNormalConfigurationEvenWhenListed() {
+    // Listing it is not enough and must not be: 1.20.2 negotiates no known-packs reply, so it
+    // would take the detached path and then never produce a baseline to compare anything against.
+    when(discovery.seamlessCanaryProtocols())
+        .thenReturn(java.util.Set.of(ProtocolVersion.MINECRAFT_1_20_2));
+    when(player.getProtocolVersion()).thenReturn(ProtocolVersion.MINECRAFT_1_20_2);
+    when(backend.getProtocolVersion()).thenReturn(ProtocolVersion.MINECRAFT_1_20_2);
+    when(play.doSwitch()).thenReturn(CompletableFuture.completedFuture(null));
+    assertTrue(start() instanceof ConfigSessionHandler);
+    verify(play).doSwitch();
+  }
+
+  @Test
+  void listedProtocolTakesTheDetachedPath() {
+    when(discovery.seamlessCanaryProtocols())
+        .thenReturn(java.util.Set.of(ProtocolVersion.MINECRAFT_1_21_11));
+    when(player.getProtocolVersion()).thenReturn(ProtocolVersion.MINECRAFT_1_21_11);
+    when(backend.getProtocolVersion()).thenReturn(ProtocolVersion.MINECRAFT_1_21_11);
+    when(player.seamlessBaseline())
+        .thenReturn(SeamlessConfigurationTest.baseline(ProtocolVersion.MINECRAFT_1_21_11));
+    assertTrue(start() instanceof SeamlessConfigSessionHandler);
+    verify(play, never()).doSwitch();
   }
 
   @Test
@@ -288,5 +315,50 @@ class DetachedLoginTest {
     } finally {
       packet.release(packet.refCnt());
     }
+  }
+
+  @Test
+  void playTagUpdateIsRecognisedAtTheCanaryProtocolsOwnPacketId() {
+    // The id moves with the version. Watching for 26.2's would leave every older family with no
+    // invalidation at all, which is how a stale baseline reaches a switch.
+    when(player.getProtocolVersion()).thenReturn(ProtocolVersion.MINECRAFT_1_21_11);
+    BackendPlaySessionHandler handler = new BackendPlaySessionHandler(server, target);
+    ByteBuf packet = Unpooled.buffer();
+    try {
+      com.velocitypowered.proxy.protocol.ProtocolUtils.writeVarInt(packet, 0x84);
+      packet.writeByte(0);
+      handler.handleUnknown(packet);
+      verify(player).setSeamlessBaseline(null);
+      assertTrue(packet.readerIndex() == 0);
+    } finally {
+      packet.release(packet.refCnt());
+    }
+  }
+
+  @Test
+  void anotherVersionsTagUpdateIdIsNotMistakenForThisOnes() {
+    when(player.getProtocolVersion()).thenReturn(ProtocolVersion.MINECRAFT_1_21_11);
+    BackendPlaySessionHandler handler = new BackendPlaySessionHandler(server, target);
+    ByteBuf packet = Unpooled.buffer();
+    try {
+      com.velocitypowered.proxy.protocol.ProtocolUtils.writeVarInt(packet, 0x86);
+      packet.writeByte(0);
+      handler.handleUnknown(packet);
+      verify(player, never()).setSeamlessBaseline(null);
+    } finally {
+      packet.release(packet.refCnt());
+    }
+  }
+
+  @Test
+  void playServerLinksAndReportDetailsInvalidateByTypeRatherThanById() {
+    // Both are registered in PLAY from 1.21, so they decode and never reach handleUnknown - the
+    // id check that used to claim to cover them could not have fired.
+    BackendPlaySessionHandler handler = new BackendPlaySessionHandler(server, target);
+    assertFalse(handler.handle(
+        mock(com.velocitypowered.proxy.protocol.packet.config.ClientboundServerLinksPacket.class)));
+    assertFalse(handler.handle(mock(
+        com.velocitypowered.proxy.protocol.packet.config.ClientboundCustomReportDetailsPacket.class)));
+    verify(player, times(2)).setSeamlessBaseline(null);
   }
 }

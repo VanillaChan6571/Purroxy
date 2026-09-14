@@ -1041,6 +1041,7 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
     if (server.getDiscovery() != null) {
       // Nothing retained for diagnosis outlives the session it came from.
       server.getDiscovery().captures().clear(getUniqueId());
+      server.getDiscovery().entityLedger().clear(getUniqueId());
       if (server.getDiscovery().limbo() != null) {
         server.getDiscovery().limbo().release(getUniqueId());
       }

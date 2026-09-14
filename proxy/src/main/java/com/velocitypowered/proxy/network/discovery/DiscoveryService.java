@@ -60,6 +60,9 @@ public final class DiscoveryService implements AutoCloseable {
   private final RegionPreferences regionPreferences;
   private final com.velocitypowered.proxy.connection.backend.SeamlessCaptures captures =
       new com.velocitypowered.proxy.connection.backend.SeamlessCaptures();
+  private final com.velocitypowered.proxy.connection.backend.SourceEntityLedger entityLedger =
+      new com.velocitypowered.proxy.connection.backend.SourceEntityLedger();
+  private final Set<com.velocitypowered.api.network.ProtocolVersion> seamlessCanaryProtocols;
   private final com.velocitypowered.proxy.connection.client.@Nullable LimboHold limbo;
   private final @Nullable HandoffCoordinator handoff;
   private final Map<DiscoveryRegistry.Session, HandoffCapabilities> handoffCapabilities = new HashMap<>();
@@ -126,6 +129,10 @@ public final class DiscoveryService implements AutoCloseable {
           }) : null;
     } catch (java.io.IOException failure) {
       throw new java.io.UncheckedIOException("Unable to load durable handoff decisions", failure);
+    }
+    this.seamlessCanaryProtocols = resolveCanaryProtocols(configuration.seamlessCanaryProtocols());
+    if (this.handoff != null) {
+      this.handoff.ledger(this.entityLedger);
     }
     if (configuration.seamlessCapturePlayer() != null) {
       try {
@@ -330,15 +337,55 @@ public final class DiscoveryService implements AutoCloseable {
   }
 
   /**
-   * Client protocols an operator has opted into for seamless switching beyond the qualified
-   * one. Resolved to versions this proxy actually speaks; an unknown number is ignored rather
-   * than allowed, so a typo cannot widen eligibility.
+   * What the proxy actually forwarded to a client about its source server's entities. Diagnostic:
+   * it explains a stale entity the backend snapshot never named, and removes nothing itself.
+   */
+  public com.velocitypowered.proxy.connection.backend.SourceEntityLedger entityLedger() {
+    return entityLedger;
+  }
+
+  /**
+   * Client protocols an operator has opted into for seamless switching beyond the qualified ones.
+   * Resolved once at startup, so what a running proxy will honour is fixed and has been reported.
    */
   public Set<com.velocitypowered.api.network.ProtocolVersion> seamlessCanaryProtocols() {
-    return configuration.seamlessCanaryProtocols().stream()
-        .map(com.velocitypowered.api.network.ProtocolVersion::getProtocolVersion)
-        .filter(version -> version != com.velocitypowered.api.network.ProtocolVersion.UNKNOWN)
-        .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    return seamlessCanaryProtocols;
+  }
+
+  /**
+   * Turns configured protocol numbers into versions this proxy will actually honour, saying out
+   * loud what it accepted and what it threw away.
+   *
+   * <p>A number that names no version, or one below the seamless floor, is dropped rather than
+   * allowed - a typo must not widen eligibility. Dropping used to be silent, which made a
+   * mistyped entry indistinguishable from an empty list for as long as the proxy ran.
+   */
+  private static Set<com.velocitypowered.api.network.ProtocolVersion> resolveCanaryProtocols(
+      Set<Integer> configured) {
+    Set<com.velocitypowered.api.network.ProtocolVersion> resolved = new java.util.HashSet<>();
+    for (Integer protocol : configured) {
+      com.velocitypowered.api.network.ProtocolVersion version =
+          com.velocitypowered.api.network.ProtocolVersion.getProtocolVersion(protocol);
+      if (version == com.velocitypowered.api.network.ProtocolVersion.UNKNOWN) {
+        logger.warn("seamless-canary-protocols lists {}, which is not a protocol this proxy speaks."
+            + " It is ignored; seamless switching stays off for it.", protocol);
+      } else if (!com.velocitypowered.proxy.connection.backend.SeamlessProtocols.canaryable(version)) {
+        logger.warn("seamless-canary-protocols lists {} ({}), which cannot support a seamless"
+            + " switch at all. It is ignored.", protocol, version.getVersionIntroducedIn());
+      } else {
+        resolved.add(version);
+      }
+    }
+    if (resolved.isEmpty()) {
+      logger.info("Seamless switching is limited to the qualified protocols;"
+          + " no canary protocols are enabled.");
+    } else {
+      logger.info("Seamless switching is additionally enabled for operator-qualified protocol(s)"
+          + " {}.", resolved.stream()
+          .map(version -> version.getProtocol() + " (" + version.getVersionIntroducedIn() + ")")
+          .sorted().collect(java.util.stream.Collectors.joining(", ")));
+    }
+    return Set.copyOf(resolved);
   }
 
   /** Whether the durable record still names this exact transfer's destination as the owner. */

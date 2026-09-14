@@ -645,8 +645,10 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
   public void handleBackendJoinGame(JoinGamePacket joinGame, VelocityServerConnection destination) {
     final MinecraftConnection serverMc = destination.ensureConnected();
     final boolean joinStateMatches = player.matchesSeamlessJoin(joinGame);
+    final boolean entityTrackingComplete = entityTrackingComplete();
     final boolean keepClientPlayState = canKeepClientPlayState(destination.isDetachedConfiguration(),
-        joinGame.getEntityId(), player.lastKnownEntityId(), joinStateMatches);
+        joinGame.getEntityId(), player.lastKnownEntityId(), joinStateMatches,
+        entityTrackingComplete);
 
     if (destination.isDetachedConfiguration()) {
       player.getBossBarManager().preparePlayReset();
@@ -676,14 +678,28 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
       // whose ids alias the destination's own.
       clearSourceState();
       player.getTabList().clearAll();
+      if (server.getDiscovery() != null && server.getDiscovery().entityLedger() != null) {
+        server.getDiscovery().entityLedger().tabCleared(player.getUniqueId());
+        // Dumped here rather than on a timer: this covers everything since the last switch, which
+        // is the previous destination's whole arrival plus this switch's cleanup, in one sequence.
+        server.getDiscovery().entityLedger().dump(player.getUniqueId(),
+            "switching to " + destination.getServerInfo().getName());
+      }
       logger.info("Seamless switch to {}: keeping the client's world, no reset sent.",
           destination.getServerInfo().getName());
     } else {
       if (destination.isDetachedConfiguration()) {
+        final String reason;
+        if (joinGame.getEntityId() != player.lastKnownEntityId()) {
+          reason = "the destination changed the player entity id";
+        } else if (!joinStateMatches) {
+          reason = "the destination JoinGame state differs from the client state";
+        } else {
+          reason = "what the client holds from the source is not known exactly, so its entity"
+              + " table cannot be cleaned and has to be rebuilt";
+        }
         logger.info("Seamless switch to {} requires a visible reset: {}.",
-            destination.getServerInfo().getName(), joinGame.getEntityId() != player.lastKnownEntityId()
-                ? "the destination changed the player entity id"
-                : "the destination JoinGame state differs from the client state");
+            destination.getServerInfo().getName(), reason);
       }
       // Clear tab list to avoid duplicate entries
       player.getTabList().clearAll();
@@ -759,9 +775,26 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
     if (server.getDiscovery() == null) {
       return;
     }
-    int[] entities = server.getDiscovery().sourceEntities(player.getUniqueId());
+    int[] snapshot = server.getDiscovery().sourceEntities(player.getUniqueId());
+    // The backend's snapshot comes from its entity tracker, so it cannot name an entity a plugin
+    // wrote straight to the connection - and a live 1.20.5 switch showed eight such ids, all sent
+    // long before the fence, none of them in a snapshot of six. Those ids are in the client's
+    // table and the destination reuses them, so the removal set is the union of what the backend
+    // tracked and what this proxy actually forwarded.
+    com.velocitypowered.proxy.connection.backend.SourceEntityLedger ledger =
+        server.getDiscovery().entityLedger();
+    int[] entities = snapshot;
+    if (ledger != null) {
+      ledger.report(player.getUniqueId(), snapshot, player.lastKnownEntityId(),
+          player.getConnectionInFlight() == null ? "the destination"
+              : player.getConnectionInFlight().getServerInfo().getName());
+      entities = ledger.removalSet(player.getUniqueId(), snapshot, player.lastKnownEntityId());
+    }
     if (entities.length > 0) {
       player.getConnection().delayedWrite(new RemoveEntitiesPacket(entities));
+      if (ledger != null) {
+        ledger.cleanup(player.getUniqueId(), entities);
+      }
     }
     String[] objectives = server.getDiscovery().sourceObjectives(player.getUniqueId());
     for (String objective : objectives) {
@@ -773,14 +806,36 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
       player.getConnection().delayedWrite(new SetPlayerTeamPacket(team));
     }
     if (entities.length > 0 || objectives.length > 0 || teams.length > 0) {
-      logger.info("Seamless switch: cleared {} entities, {} objectives and {} teams the source had"
-          + " shown this client.", entities.length, objectives.length, teams.length);
+      logger.info("Seamless switch: cleared {} entities ({} the backend tracked, {} only this proxy"
+          + " saw), {} objectives and {} teams the source had shown this client.", entities.length,
+          snapshot.length, Math.max(0, entities.length - snapshot.length), objectives.length,
+          teams.length);
     }
   }
 
+  /**
+   * Whether this client can be left in PLAY, with nothing sent to reset it.
+   *
+   * <p>{@code entityTrackingComplete} is the newest of these and the least obvious. Keeping the
+   * client in PLAY keeps its entity table, which means the source's entities have to be removed by
+   * hand and exactly. Where what the source showed the client is not known in full, there is no
+   * removal set worth sending, and the honest outcome is the visible path: JoinGame and Respawn
+   * rebuild the table wholesale.
+   */
   static boolean canKeepClientPlayState(boolean detached, int destinationEntityId,
-      int currentEntityId, boolean joinStateMatches) {
-    return detached && destinationEntityId == currentEntityId && joinStateMatches;
+      int currentEntityId, boolean joinStateMatches, boolean entityTrackingComplete) {
+    return detached && destinationEntityId == currentEntityId && joinStateMatches
+        && entityTrackingComplete;
+  }
+
+  /** Whether the source's entities are known exactly enough to be removed rather than reset. */
+  private boolean entityTrackingComplete() {
+    if (server.getDiscovery() == null) {
+      return false;
+    }
+    com.velocitypowered.proxy.connection.backend.SourceEntityLedger ledger =
+        server.getDiscovery().entityLedger();
+    return ledger != null && ledger.tracksCompletely(player.getUniqueId());
   }
 
   private void doFastClientServerSwitch(JoinGamePacket joinGame) {

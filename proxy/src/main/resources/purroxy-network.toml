@@ -20,6 +20,12 @@ fallback = ["hub"]
 # are disconnected with the reason they would have received immediately. 0 disables the hold.
 limbo-hold-seconds = 60
 
+# How many held players may be sent at a returning backend each second. A hub that has just
+# come back would be knocked straight over again if everyone waiting for it arrived at once,
+# so the queue drains longest-wait-first at this rate.
+limbo-releases-per-second = 2
+
+
 
 
 [forced-hosts]

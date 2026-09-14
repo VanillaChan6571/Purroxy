@@ -18,6 +18,7 @@
 package com.velocitypowered.proxy.connection.client;
 
 import com.velocitypowered.proxy.protocol.packet.KeepAlivePacket;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -65,14 +66,17 @@ public final class LimboHold implements AutoCloseable {
     return thread;
   });
   private final long holdMillis;
+  private final int releasesPerTick;
 
   /**
    * Starts the ticker that keeps held players alive and looks for somewhere to put them.
    *
    * @param holdSeconds how long a player may wait for a backend; zero disables holding
+   * @param releasesPerSecond how many players may be sent at a returning backend each second
    */
-  public LimboHold(int holdSeconds) {
+  public LimboHold(int holdSeconds, int releasesPerSecond) {
     this.holdMillis = TimeUnit.SECONDS.toMillis(holdSeconds);
+    this.releasesPerTick = Math.max(1, releasesPerSecond);
     if (holdSeconds > 0) {
       ticker.scheduleWithFixedDelay(this::tick, 1, 1, TimeUnit.SECONDS);
     }
@@ -128,7 +132,13 @@ public final class LimboHold implements AutoCloseable {
   private void tick() {
     try {
       long now = System.currentTimeMillis();
-      for (Held entry : Map.copyOf(held).values()) {
+      // Longest wait first, so a queue that forms during an outage drains in the order it
+      // formed rather than by whoever the map happens to iterate first.
+      List<Held> waiting = held.values().stream()
+          .sorted(java.util.Comparator.comparingLong(Held::since)).toList();
+      int released = 0;
+      for (int place = 0; place < waiting.size(); place++) {
+        Held entry = waiting.get(place);
         ConnectedPlayer player = entry.player();
         if (!player.isActive()) {
           held.remove(player.getUniqueId());
@@ -142,11 +152,14 @@ public final class LimboHold implements AutoCloseable {
           continue;
         }
         keepAlive(player, entry, now);
-        notice(player, entry, now);
-        // Attempted every tick: the whole point is to leave as soon as anywhere will take them.
-        if (player.tryLeaveLimbo()) {
+        notice(player, entry, now, place + 1, waiting.size());
+        // Rate limited on purpose. A hub that has just come back would be knocked straight
+        // over again by everyone who was waiting for it arriving at once.
+        if (released < releasesPerTick && player.tryLeaveLimbo()) {
+          released++;
           held.remove(player.getUniqueId());
-          logger.info("{} left the proxy hold for an available server.", player.getUsername());
+          logger.info("{} left the proxy hold for an available server ({} still waiting).",
+              player.getUsername(), waiting.size() - released);
         }
       }
     } catch (RuntimeException failure) {
@@ -166,16 +179,16 @@ public final class LimboHold implements AutoCloseable {
     player.getConnection().write(alive);
   }
 
-  private void notice(ConnectedPlayer player, Held entry, long now) {
+  private void notice(ConnectedPlayer player, Held entry, long now, int place, int waiting) {
     if (now - entry.lastNotice()[0] < NOTICE_MILLIS) {
       return;
     }
     entry.lastNotice()[0] = now;
-    player.sendMessage(message(held.size()));
+    player.sendMessage(message(waiting, place));
   }
 
-  /** The standing notice shown while a player waits, including how many others are waiting. */
-  static Component message(int waiting) {
+  /** The standing notice shown while a player waits, with their place in the queue. */
+  static Component message(int waiting, int place) {
     String rule = "====================================================";
     return Component.text()
         .append(Component.text(rule, NamedTextColor.DARK_GRAY)).append(Component.newline())
@@ -185,6 +198,9 @@ public final class LimboHold implements AutoCloseable {
         .append(Component.newline()).append(Component.newline())
         .append(Component.text("Current Connected Limbo Players: ", NamedTextColor.GRAY))
         .append(Component.text(waiting, NamedTextColor.WHITE))
+        .append(Component.newline())
+        .append(Component.text("Your place in the queue: ", NamedTextColor.GRAY))
+        .append(Component.text(place + " of " + waiting, NamedTextColor.WHITE))
         .append(Component.newline())
         .append(Component.text(rule, NamedTextColor.DARK_GRAY))
         .build();

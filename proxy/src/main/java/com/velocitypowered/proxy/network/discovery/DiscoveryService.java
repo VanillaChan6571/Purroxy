@@ -105,7 +105,7 @@ public final class DiscoveryService implements AutoCloseable {
       regionPreferences = new RegionPreferences(java.nio.file.Path.of("purroxy-regions.properties"));
       limbo = configuration.limboHoldSeconds() > 0
           ? new com.velocitypowered.proxy.connection.client.LimboHold(
-              configuration.limboHoldSeconds()) : null;
+              configuration.limboHoldSeconds(), configuration.limboReleasesPerSecond()) : null;
     } catch (java.io.IOException failure) {
       throw new java.io.UncheckedIOException("Unable to load player region preferences", failure);
     }
@@ -647,6 +647,13 @@ public final class DiscoveryService implements AutoCloseable {
       published.put(session, physical);
       channels.put(session, channel);
       logger.info("Backend {} registered for {} in {}", resume.serverId(), resume.group(), resume.region());
+      if (limbo != null) {
+        // A backend that comes up already READY is never woken, so registration is the only
+        // moment anyone waiting would hear that their way out has appeared.
+        limbo.announce(net.kyori.adventure.text.Component.text("Purroxy detected backend "
+            + resume.serverId() + " coming online in group " + resume.group() + " ("
+            + resume.region() + ")", net.kyori.adventure.text.format.NamedTextColor.AQUA));
+      }
       return session;
     } catch (RuntimeException failure) {
       registry.disconnected(session);

@@ -59,6 +59,33 @@ class SeamlessConfigurationTest {
   private static final ProtocolVersion VERSION = ProtocolVersion.MINECRAFT_26_2;
 
   @Test
+  void legacyCaptureRejectsKnownPacksAndIncompleteExchanges() {
+    ProtocolVersion legacy = ProtocolVersion.MINECRAFT_1_20_3;
+    SeamlessConfiguration.Capture invalid = new SeamlessConfiguration.Capture(legacy, true);
+    invalid.observe(packs());
+    invalid.observe(FinishedUpdatePacket.INSTANCE);
+    assertTrue(invalid.baseline().isEmpty());
+    SeamlessConfiguration.Capture incomplete = new SeamlessConfiguration.Capture(legacy, true);
+    incomplete.observe(new ActiveFeaturesPacket());
+    incomplete.observe(new TagsUpdatePacket());
+    incomplete.observe(FinishedUpdatePacket.INSTANCE);
+    assertTrue(incomplete.baseline().isEmpty());
+    SeamlessConfiguration negotiation = new SeamlessConfiguration(baseline(legacy), legacy);
+    assertThrows(IllegalStateException.class, () -> negotiation.accept(packs()));
+    assertFalse(negotiation.complete());
+  }
+
+  @Test
+  void legacySelectionComparisonIsBoundToTheProtocol() {
+    ProtocolVersion legacy = ProtocolVersion.MINECRAFT_1_20_3;
+    SeamlessConfiguration negotiation = new SeamlessConfiguration(baseline(legacy), legacy);
+    assertTrue(negotiation.matchesSelection(baseline(legacy)));
+    assertFalse(negotiation.matchesSelection(baseline()));
+    assertThrows(IllegalArgumentException.class,
+        () -> new SeamlessConfiguration(baseline(legacy), VERSION));
+  }
+
+  @Test
   void matchingConfigurationReplaysClientSelectionAndFinishes() {
     SeamlessConfiguration negotiation = new SeamlessConfiguration(baseline(), VERSION);
     KnownPacksPacket selected = (KnownPacksPacket) negotiation.accept(packs()).orElseThrow();
@@ -381,8 +408,10 @@ class SeamlessConfigurationTest {
   private static SeamlessConfiguration.Baseline baseline(TagsUpdatePacket tags,
       ProtocolVersion version) {
     SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(version, true);
-    capture.observe(packs(version));
-    capture.select(packs(version));
+    if (!version.lessThan(ProtocolVersion.MINECRAFT_1_20_5)) {
+      capture.observe(packs(version));
+      capture.select(packs(version));
+    }
     RegistrySyncPacket packet = registry(1, version);
     try {
       capture.observe(packet);
@@ -486,7 +515,10 @@ class SeamlessConfigurationTest {
 
   private static RegistrySyncPacket registry(int value, ProtocolVersion version) {
     RegistrySyncPacket packet = new RegistrySyncPacket();
-    ByteBuf bytes = Unpooled.wrappedBuffer(new byte[] {(byte) value});
+    // Legacy registry data is one unnamed NBT compound; use a valid compound with a byte value.
+    byte[] payload = version.lessThan(ProtocolVersion.MINECRAFT_1_20_5)
+        ? new byte[] {10, 1, 0, 1, 'v', (byte) value, 0} : new byte[] {(byte) value};
+    ByteBuf bytes = Unpooled.wrappedBuffer(payload);
     try {
       packet.decode(bytes, ProtocolUtils.Direction.CLIENTBOUND, version);
       return packet;
@@ -547,10 +579,12 @@ class SeamlessConfigurationTest {
     // of that claim: capture at the protocol, replay the same exchange, and expect a match.
     SeamlessConfiguration negotiation =
         new SeamlessConfiguration(baseline(version), version);
-    KnownPacksPacket selected =
-        (KnownPacksPacket) negotiation.accept(packs(version)).orElseThrow();
-    assertArrayEquals(new byte[] {0},
-        SeamlessConfiguration.encode(selected, ProtocolUtils.Direction.SERVERBOUND, version));
+    if (!version.lessThan(ProtocolVersion.MINECRAFT_1_20_5)) {
+      KnownPacksPacket selected =
+          (KnownPacksPacket) negotiation.accept(packs(version)).orElseThrow();
+      assertArrayEquals(new byte[] {0},
+          SeamlessConfiguration.encode(selected, ProtocolUtils.Direction.SERVERBOUND, version));
+    }
     RegistrySyncPacket sync = registry(1, version);
     try {
       assertTrue(negotiation.accept(sync).isEmpty());
@@ -568,7 +602,9 @@ class SeamlessConfigurationTest {
   void differentRegistryIsRefusedAtEveryEligibleProtocol(ProtocolVersion version) {
     SeamlessConfiguration negotiation =
         new SeamlessConfiguration(baseline(version), version);
-    negotiation.accept(packs(version));
+    if (!version.lessThan(ProtocolVersion.MINECRAFT_1_20_5)) {
+      negotiation.accept(packs(version));
+    }
     RegistrySyncPacket sync = registry(2, version);
     try {
       assertThrows(IllegalStateException.class, () -> negotiation.accept(sync));

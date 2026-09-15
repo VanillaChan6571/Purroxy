@@ -33,6 +33,7 @@ import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_19;
 import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_19_1;
 import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_19_3;
 import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_19_4;
+import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_20;
 import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_20_2;
 import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_20_3;
 import static com.velocitypowered.api.network.ProtocolVersion.MINECRAFT_1_20_5;
@@ -606,6 +607,8 @@ public enum StateRegistry {
           // mapped across the entire band: the seamless path writes them with the client still in
           // PLAY, so a missing id is not a silent no-op but an encoder exception that drops the
           // player mid-switch.
+          map(0x3E, MINECRAFT_1_20, true),
+          map(0x40, MINECRAFT_1_20_2, true),
           map(0x42, MINECRAFT_1_20_5, true),
           map(0x47, MINECRAFT_1_21_2, true),
           map(0x46, MINECRAFT_1_21_5, true),
@@ -614,6 +617,9 @@ public enum StateRegistry {
       clientbound.register(
           SetObjectivePacket.class,
           SetObjectivePacket::new,
+          map(0x58, MINECRAFT_1_20, true),
+          map(0x5A, MINECRAFT_1_20_2, true),
+          map(0x5C, MINECRAFT_1_20_3, true),
           map(0x5E, MINECRAFT_1_20_5, true),
           map(0x64, MINECRAFT_1_21_2, true),
           map(0x63, MINECRAFT_1_21_5, true),
@@ -622,6 +628,9 @@ public enum StateRegistry {
       clientbound.register(
           SetPlayerTeamPacket.class,
           SetPlayerTeamPacket::new,
+          map(0x5A, MINECRAFT_1_20, true),
+          map(0x5C, MINECRAFT_1_20_2, true),
+          map(0x5E, MINECRAFT_1_20_3, true),
           map(0x60, MINECRAFT_1_20_5, true),
           map(0x67, MINECRAFT_1_21_2, true),
           map(0x66, MINECRAFT_1_21_5, true),

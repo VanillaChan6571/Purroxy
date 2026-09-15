@@ -260,12 +260,34 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   }
 
   /**
+   * Records a secure-chat handoff observation for the selected debugging player, if any. Does
+   * nothing otherwise, and never alters chat state.
+   *
+   * @param event what happened
+   * @param detail counts and offsets only, never message content or signatures
+   */
+  public void traceChat(String event, String detail) {
+    if (server.getDiscovery() != null && server.getDiscovery().captures() != null) {
+      server.getDiscovery().captures().chatTrace(getUniqueId(), event, detail);
+    }
+  }
+
+  /**
    * Discards any messages still being processed by the {@link ChatQueue}, and creates a fresh state for future packets.
    * This should be used on server switches, or whenever the client resets its own 'last seen' state.
    */
   public void discardChatQueue() {
     // No need for atomic swap, should only be called from event loop
     final ChatQueue oldChatQueue = chatQueue;
+    // The discard point is the proxy/client synchronisation point. A seamless switch that
+    // suppresses JoinGame must not reach here, or the mirror is thrown away while the client keeps
+    // its own - so record what was held at the moment it would have been dropped.
+    traceChat("discardChatQueue", oldChatQueue.state().describe());
+    if (server.getDiscovery() != null && server.getDiscovery().captures() != null) {
+      // This is the point the client resets its own tracker, so received-chat state expires here
+      // too. A seamless switch never reaches it, which is precisely why it cannot assume emptiness.
+      server.getDiscovery().captures().resetChatFrame(getUniqueId());
+    }
     chatQueue = new ChatQueue(this);
     oldChatQueue.close();
   }

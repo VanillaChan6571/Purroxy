@@ -265,16 +265,29 @@ class DetachedLoginTest {
   }
 
   @Test
-  void protocolBelowTheSeamlessFloorUsesNormalConfigurationEvenWhenListed() {
-    // Listing it is not enough and must not be: 1.20.2 negotiates no known-packs reply, so it
-    // would take the detached path and then never produce a baseline to compare anything against.
+  void protocolBelowTheSeamlessFloorUsesNormalPlayLoginEvenWhenListed() {
+    when(discovery.seamlessCanaryProtocols())
+        .thenReturn(java.util.Set.of(ProtocolVersion.MINECRAFT_1_20));
+    when(player.getProtocolVersion()).thenReturn(ProtocolVersion.MINECRAFT_1_20);
+    when(backend.getProtocolVersion()).thenReturn(ProtocolVersion.MINECRAFT_1_20);
+    login.handle(mock(ServerLoginSuccessPacket.class));
+    verify(backend).setActiveSessionHandler(eq(StateRegistry.PLAY), any(TransitionSessionHandler.class));
+    verify(backend, never()).write(any(LoginAcknowledgedPacket.class));
+    assertFalse(target.detachedAttempted);
+  }
+
+  @Test
+  void listedProtocol764StartsDetachedConfigurationWithoutKnownPacks() {
     when(discovery.seamlessCanaryProtocols())
         .thenReturn(java.util.Set.of(ProtocolVersion.MINECRAFT_1_20_2));
     when(player.getProtocolVersion()).thenReturn(ProtocolVersion.MINECRAFT_1_20_2);
     when(backend.getProtocolVersion()).thenReturn(ProtocolVersion.MINECRAFT_1_20_2);
-    when(play.doSwitch()).thenReturn(CompletableFuture.completedFuture(null));
-    assertTrue(start() instanceof ConfigSessionHandler);
-    verify(play).doSwitch();
+    when(player.seamlessBaseline())
+        .thenReturn(SeamlessConfigurationTest.baseline(ProtocolVersion.MINECRAFT_1_20_2));
+    assertTrue(start() instanceof SeamlessConfigSessionHandler);
+    verify(backend).write(any(LoginAcknowledgedPacket.class));
+    verify(backend, never()).write(any(KnownPacksPacket.class));
+    verify(play, never()).doSwitch();
   }
 
   @Test

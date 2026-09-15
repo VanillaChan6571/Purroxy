@@ -82,6 +82,14 @@ public class ChatQueue implements AutoCloseable {
   public void queuePacket(Function<LastSeenMessages, CompletableFuture<MinecraftPacket>> nextPacket, @Nullable Instant timestamp, @Nullable LastSeenMessages lastSeenMessages) {
     queueTask((chatState, smc) -> {
       LastSeenMessages newLastSeenMessages = chatState.updateFromMessage(timestamp, lastSeenMessages);
+      // Every signed chat and signed command the client sends passes through here, and this is
+      // where the proxy rewrites the client's offset into the one the backend is given. Both
+      // sides of that rewrite matter to whether the frame can be handed to a new destination.
+      player.traceChat("clientToBackend", "clientOffset="
+          + (lastSeenMessages == null ? "none" : lastSeenMessages.getOffset())
+          + ", forwardedOffset="
+          + (newLastSeenMessages == null ? "none" : newLastSeenMessages.getOffset())
+          + ", after " + chatState.describe());
       return nextPacket.apply(newLastSeenMessages).thenCompose(packet -> writePacket(packet, smc));
     });
   }
@@ -98,6 +106,17 @@ public class ChatQueue implements AutoCloseable {
       T packet = packetFunction.apply(chatState);
       return writePacket(packet, smc);
     });
+  }
+
+  /**
+   * The proxy's mirror of the client's secure-chat state, for handoff tracing. Read only; this
+   * exists because the mirror is discarded on JoinGame and a suppressed JoinGame would leave it
+   * holding the frame the destination lacks.
+   *
+   * @return the live chat state
+   */
+  public ChatState state() {
+    return chatState;
   }
 
   public void handleAcknowledgement(int offset) {
@@ -188,6 +207,17 @@ public class ChatQueue implements AutoCloseable {
 
     public LastSeenMessages createLastSeen() {
       return new LastSeenMessages(0, lastSeenMessages, (byte) 0);
+    }
+
+    /**
+     * Compact description for handoff tracing. Counts and timestamps only - never message content,
+     * signatures or the acknowledged bits themselves.
+     *
+     * @return a one-line summary of the mirrored state
+     */
+    public String describe() {
+      return "lastTimestamp=" + lastTimestamp + ", acknowledgedBits=" + lastSeenMessages.cardinality()
+          + ", delayedAck=" + delayedAckCount.get();
     }
   }
 }

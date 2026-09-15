@@ -370,8 +370,8 @@ public final class DiscoveryService implements AutoCloseable {
         logger.warn("seamless-canary-protocols lists {}, which is not a protocol this proxy speaks."
             + " It is ignored; seamless switching stays off for it.", protocol);
       } else if (!com.velocitypowered.proxy.connection.backend.SeamlessProtocols.canaryable(version)) {
-        logger.warn("seamless-canary-protocols lists {} ({}), which cannot support a seamless"
-            + " switch at all. It is ignored.", protocol, version.getVersionIntroducedIn());
+        logger.warn("seamless-canary-protocols lists {} ({}), which has no implemented seamless"
+            + " configuration path or complete packet mappings in this build. It is ignored.", protocol, version.getVersionIntroducedIn());
       } else {
         resolved.add(version);
       }
@@ -380,8 +380,9 @@ public final class DiscoveryService implements AutoCloseable {
       logger.info("Seamless switching is limited to the qualified protocols;"
           + " no canary protocols are enabled.");
     } else {
-      logger.info("Seamless switching is additionally enabled for operator-qualified protocol(s)"
-          + " {}.", resolved.stream()
+      logger.warn("Experimental seamless switching enabled by seamless-canary-protocols for"
+          + " {}. These protocols are not automatically qualified by this build; test both"
+          + " directions. Configuration and state checks remain enforced.", resolved.stream()
           .map(version -> version.getProtocol() + " (" + version.getVersionIntroducedIn() + ")")
           .sorted().collect(java.util.stream.Collectors.joining(", ")));
     }

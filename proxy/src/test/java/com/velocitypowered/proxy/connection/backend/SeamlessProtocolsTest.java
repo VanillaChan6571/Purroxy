@@ -36,7 +36,8 @@ class SeamlessProtocolsTest {
 
   /** Every protocol this build is willing to let an operator qualify. */
   static Set<ProtocolVersion> band() {
-    return Set.of(ProtocolVersion.MINECRAFT_1_20_5, ProtocolVersion.MINECRAFT_1_21,
+    return Set.of(ProtocolVersion.MINECRAFT_1_20, ProtocolVersion.MINECRAFT_1_20_2,
+        ProtocolVersion.MINECRAFT_1_20_3, ProtocolVersion.MINECRAFT_1_20_5, ProtocolVersion.MINECRAFT_1_21,
         ProtocolVersion.MINECRAFT_1_21_2, ProtocolVersion.MINECRAFT_1_21_4,
         ProtocolVersion.MINECRAFT_1_21_5, ProtocolVersion.MINECRAFT_1_21_6,
         ProtocolVersion.MINECRAFT_1_21_7, ProtocolVersion.MINECRAFT_1_21_9,
@@ -73,11 +74,10 @@ class SeamlessProtocolsTest {
 
   @ParameterizedTest
   @EnumSource(value = ProtocolVersion.class,
-      names = {"UNKNOWN", "LEGACY", "MINECRAFT_1_20_2", "MINECRAFT_1_20_3", "MINECRAFT_1_19_4",
+      names = {"UNKNOWN", "LEGACY", "MINECRAFT_1_19_4",
           "MINECRAFT_1_16", "MINECRAFT_1_8"})
   void belowTheFloorNothingCanBeTurnedOn(ProtocolVersion protocol) {
-    // Not merely unqualified: a client here produces no known-packs reply and so never yields a
-    // baseline, so listing it would look like an opt-in and do nothing.
+    // These protocols do not have a supported seamless path in this build.
     assertFalse(SeamlessProtocols.canaryable(protocol));
     VelocityServer proxy = mock(VelocityServer.class);
     DiscoveryService discovery = mock(DiscoveryService.class);

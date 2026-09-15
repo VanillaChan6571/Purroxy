@@ -60,6 +60,7 @@ import com.velocitypowered.proxy.protocol.packet.TabCompleteResponsePacket;
 import com.velocitypowered.proxy.protocol.packet.TabCompleteResponsePacket.Offer;
 import com.velocitypowered.proxy.protocol.packet.chat.ChatAcknowledgementPacket;
 import com.velocitypowered.proxy.protocol.packet.chat.ChatHandler;
+import com.velocitypowered.proxy.protocol.packet.chat.ChatQueue;
 import com.velocitypowered.proxy.protocol.packet.chat.ChatTimeKeeper;
 import com.velocitypowered.proxy.protocol.packet.chat.CommandHandler;
 import com.velocitypowered.proxy.protocol.packet.chat.ComponentHolder;
@@ -490,6 +491,8 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
     if (player.getCurrentServer().isEmpty()) {
       return true;
     }
+    player.traceChat("clientAcknowledgement",
+        "offset=" + packet.offset() + ", before " + player.getChatQueue().state().describe());
     player.getChatQueue().handleAcknowledgement(packet.offset());
     return true;
   }
@@ -644,13 +647,40 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
    */
   public void handleBackendJoinGame(JoinGamePacket joinGame, VelocityServerConnection destination) {
     final MinecraftConnection serverMc = destination.ensureConnected();
+    if (server.getDiscovery() != null && server.getDiscovery().captures() != null) {
+      server.getDiscovery().captures().legacyJoin(player.getUniqueId(),
+          destination.getServerInfo().getName(), joinGame, player.getProtocolVersion());
+      // The frame the destination would be arriving into, read before handleBackendJoinGame's
+      // own handling can discard it.
+      player.traceChat("transferBoundary -> " + destination.getServerInfo().getName(),
+          player.getChatQueue().state().describe());
+      server.getDiscovery().captures().reportClientbound(player.getUniqueId(),
+          destination.getServerInfo().getName(), player.getProtocolVersion());
+    }
     final boolean joinStateMatches = player.matchesSeamlessJoin(joinGame);
     final boolean entityTrackingComplete = entityTrackingComplete();
-    final boolean keepClientPlayState = canKeepClientPlayState(destination.isDetachedConfiguration(),
+    final boolean chatContinuity = chatContinuity();
+    // Below 1.20.2 there is no configuration to detach from, so a legacy arrival stands in for it.
+    // Both mean the same thing here: the destination is a candidate for leaving the client in PLAY,
+    // and the checks below decide. What differs is only how equivalence was established - a
+    // captured CONFIG baseline above, the destination's own JoinGame here.
+    final boolean seamlessCandidate = destination.isDetachedConfiguration()
+        || destination.isLegacySeamlessArrival();
+    final boolean keepClientPlayState = canKeepClientPlayState(seamlessCandidate,
         joinGame.getEntityId(), player.lastKnownEntityId(), joinStateMatches,
-        entityTrackingComplete);
+        entityTrackingComplete, chatContinuity);
+    if (!chatContinuity && seamlessCandidate && joinStateMatches
+        && entityTrackingComplete && joinGame.getEntityId() == player.lastKnownEntityId()) {
+      logger.info("Seamless switch to {} declined for {}: the client holds secure-chat state that"
+          + " only JoinGame clears, and the destination would reject the next message it sends."
+          + " Falling back to a visible transfer.", destination.getServerInfo().getName(), player);
+    }
 
-    if (destination.isDetachedConfiguration()) {
+    // A legacy arrival only needs this when the client is actually kept in PLAY: if it falls back,
+    // its JoinGame clears the bars itself, which is not true of a detached arrival that already
+    // absorbed the destination's configuration.
+    if (destination.isDetachedConfiguration()
+        || destination.isLegacySeamlessArrival() && keepClientPlayState) {
       player.getBossBarManager().preparePlayReset();
       // CONFIG normally clears backend boss bars. This path remains in PLAY.
       for (UUID serverBossBar : serverBossBars) {
@@ -823,9 +853,33 @@ public class ClientPlaySessionHandler implements MinecraftSessionHandler {
    * rebuild the table wholesale.
    */
   static boolean canKeepClientPlayState(boolean detached, int destinationEntityId,
-      int currentEntityId, boolean joinStateMatches, boolean entityTrackingComplete) {
+      int currentEntityId, boolean joinStateMatches, boolean entityTrackingComplete,
+      boolean chatContinuity) {
     return detached && destinationEntityId == currentEntityId && joinStateMatches
-        && entityTrackingComplete;
+        && entityTrackingComplete && chatContinuity;
+  }
+
+  /**
+   * Whether the client's secure-chat frame can survive this transfer.
+   *
+   * <p>Keeping the client in PLAY keeps its {@code lastSeenMessages} tracker and signature cache,
+   * which only JoinGame clears. The destination's validator starts empty, so the first message the
+   * client sends afterwards carries indices it cannot resolve, and vanilla answers that with a
+   * {@code chat_validation_failed} disconnect rather than a degraded conversation.
+   *
+   * <p>Two things must both hold, and neither is sufficient alone. The proxy's own mirror must be
+   * untouched, and no signed message may have been *delivered* to the client - the mirror only
+   * advances when the client sends, so a player who has been reading chat without speaking has an
+   * empty mirror and a full tracker. Unverified protocols fail closed.
+   */
+  private boolean chatContinuity() {
+    if (server.getDiscovery() == null || server.getDiscovery().captures() == null) {
+      return false;
+    }
+    ChatQueue.ChatState state = player.getChatQueue().state();
+    return state.createLastSeen().getAcknowledged().isEmpty()
+        && server.getDiscovery().captures()
+            .chatFrameProvablyEmpty(player.getUniqueId(), player.getProtocolVersion());
   }
 
   /** Whether the source's entities are known exactly enough to be removed rather than reset. */

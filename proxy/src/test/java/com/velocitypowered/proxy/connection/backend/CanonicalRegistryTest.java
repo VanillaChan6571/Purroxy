@@ -289,6 +289,10 @@ class CanonicalRegistryTest {
     // The shape is identical from 1.20.5 up, so a payload's canonical digest must not depend on
     // which protocol in the band it was read at - otherwise two hubs could never match.
     byte[] payload = single(compound("b", "2", "a", "1"));
+    if (protocol.lessThan(ProtocolVersion.MINECRAFT_1_20_5)) {
+      assertTrue(CanonicalRegistry.digest(payload, protocol).isEmpty());
+      return;
+    }
     assertArrayEquals(digest(payload).orElseThrow(),
         CanonicalRegistry.digest(payload, protocol).orElseThrow());
   }

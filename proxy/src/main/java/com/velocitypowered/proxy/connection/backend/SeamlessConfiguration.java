@@ -85,8 +85,8 @@ public final class SeamlessConfiguration {
   }
 
   /** Reads the registry identifier a payload starts with, or empty when it is not a registry. */
-  static String registryOf(MinecraftPacket packet, byte[] payload) {
-    String described = describePayload(packet, payload);
+  static String registryOf(MinecraftPacket packet, byte[] payload, ProtocolVersion protocol) {
+    String described = describePayload(packet, payload, protocol);
     int marker = described.indexOf("registry=");
     return marker < 0 ? "" : described.substring(marker + "registry=".length());
   }
@@ -134,6 +134,11 @@ public final class SeamlessConfiguration {
       // the protocol the bytes were produced at, so a later comparison can insist on the same.
       this.protocol = version;
       invalid = !eligible;
+      // No selection exchange exists before 1.20.5. Empty bytes represent its absence, not a
+      // synthetic KnownPacks packet; the destination must follow the same legacy exchange.
+      if (version.lessThan(ProtocolVersion.MINECRAFT_1_20_5)) {
+        knownPacksReply = new byte[0];
+      }
     }
 
     void observe(MinecraftPacket packet) {
@@ -155,7 +160,7 @@ public final class SeamlessConfiguration {
           throw new IllegalStateException("Unsupported configuration exchange");
         }
         if (packet instanceof KnownPacksPacket) {
-          if (offered) {
+          if (protocol.lessThan(ProtocolVersion.MINECRAFT_1_20_5) || offered) {
             throw new IllegalStateException("Repeated known-packs negotiation");
           }
           offered = true;
@@ -181,7 +186,7 @@ public final class SeamlessConfiguration {
           throw new IllegalStateException("Configuration capture limit exceeded");
         }
         packets.add(fingerprint(packet, payload, protocol));
-        sink.payload(registryOf(packet, payload), payload, true);
+        sink.payload(registryOf(packet, payload, protocol), payload, true);
       } catch (RuntimeException failure) {
         invalidate();
       }
@@ -268,7 +273,7 @@ public final class SeamlessConfiguration {
       Fingerprint actual = fingerprint(packet, payload, protocol);
       if (!expected.matches(actual)) {
         // Handed over before the throw, so the side that diverged is available to explain it.
-        sink.payload(registryOf(packet, payload), payload, false);
+        sink.payload(registryOf(packet, payload, protocol), payload, false);
         throw new IllegalStateException("Configuration mismatch at data packet #" + (cursor + 1)
             + ": expected [" + expected.describe() + "], received [" + actual.describe() + "]");
       }
@@ -298,7 +303,8 @@ public final class SeamlessConfiguration {
   }
 
   boolean matchesSelection(Baseline observed) {
-    return MessageDigest.isEqual(baseline.knownPacksReply, observed.knownPacksReply);
+    return baseline.protocol == observed.protocol
+        && MessageDigest.isEqual(baseline.knownPacksReply, observed.knownPacksReply);
   }
 
   boolean reorderedTags() {
@@ -336,19 +342,22 @@ public final class SeamlessConfiguration {
         }
       }
       return new Fingerprint(packet.getClass(), comparisonDigest, wireDigest,
-          payload.length, describePayload(packet, payload));
+          payload.length, describePayload(packet, payload, protocol));
     } catch (NoSuchAlgorithmException impossible) {
       throw new AssertionError(impossible);
     }
   }
 
-  private static String describePayload(MinecraftPacket packet, byte[] payload) {
+  private static String describePayload(MinecraftPacket packet, byte[] payload, ProtocolVersion protocol) {
     if (!(packet instanceof RegistrySyncPacket)) {
       return "";
     }
+    if (protocol.lessThan(ProtocolVersion.MINECRAFT_1_20_5)) {
+      return " registry=<whole-registry>";
+    }
     // From 1.20.5 a registry sync encodes the registry identifier before the entry list and its
-    // NBT. Read only that bounded prefix, leaving the original deferred packet untouched. Older
-    // protocols are never eligible, so the earlier whole-registry shape cannot reach this.
+    // NBT. Read only that bounded prefix, leaving the original deferred packet untouched. The
+    // earlier whole-registry shape is handled above.
     ByteBuf buffer = Unpooled.wrappedBuffer(payload);
     try {
       String registry = ProtocolUtils.readString(buffer, 256);

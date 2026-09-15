@@ -18,6 +18,8 @@
 package com.velocitypowered.proxy.connection.backend;
 
 import com.velocitypowered.api.network.ProtocolVersion;
+import com.velocitypowered.proxy.protocol.ProtocolUtils;
+import io.netty.buffer.ByteBuf;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -58,11 +60,13 @@ public final class SeamlessCaptures {
 
   private final Map<UUID, Capture> baselines = new ConcurrentHashMap<>();
   private volatile @Nullable UUID selected;
+  private final LegacyPlayDiagnostics legacy = new LegacyPlayDiagnostics();
 
   /** Names the single player whose biome registry is retained, or clears the selection. */
   public void select(@Nullable UUID player) {
     UUID previous = this.selected;
     this.selected = player;
+    legacy.clear();
     if (previous != null && !previous.equals(player)) {
       baselines.remove(previous);
     }
@@ -108,8 +112,185 @@ public final class SeamlessCaptures {
         RegistryPayloadDiff.describe(baseline.payload(), payload, protocol, 16));
   }
 
+  /**
+   * Per-visit histogram of opaque clientbound PLAY ids, for every player rather than the selected
+   * one. Identifying a packet by id is what went wrong at 763, so any id a safety gate depends on
+   * is confirmed against a live stream before it is trusted. That check earned its place twice: it
+   * caught 0x68 being teleport rather than features at 763, and it exposed a mis-parse of the 776
+   * packet table that had briefly looked like a defect in {@link SeamlessProtocols}.
+   */
+  private final Map<UUID, Visit> clientboundIds = new ConcurrentHashMap<>();
+
+  /** One backend visit's counts, named by the backend they were actually observed on. */
+  private static final class Visit {
+    private final String backend;
+    private final Map<Integer, int[]> ids = new ConcurrentHashMap<>();
+
+    private Visit(String backend) {
+      this.backend = backend;
+    }
+  }
+
+  /**
+   * Signed {@code player_chat} delivered to each client since its chat frame was last reset. The
+   * proxy's own {@code ChatState} cannot answer this: it only moves when the client *sends*, and
+   * its acknowledged bitset saturates at {@code LastSeenMessages.WINDOW_SIZE}. A player who has
+   * only been reading chat has an empty bitset and a full client-side tracker, which is exactly
+   * the case that was kicked on arrival.
+   */
+  private final Map<UUID, int[]> signedChatSinceReset = new ConcurrentHashMap<>();
+
+  /** Forgets received-chat state, for the JoinGame that also resets the client's tracker. */
+  public void resetChatFrame(UUID player) {
+    signedChatSinceReset.remove(player);
+  }
+
+  /**
+   * Whether this client's chat frame is provably still empty, so a destination that starts with an
+   * empty validator can accept what the client sends next.
+   *
+   * <p>Fails closed. An unverified protocol, or any signed message already delivered, means the
+   * answer is no - never an assumption that nothing arrived.
+   *
+   * @param player the player about to be transferred
+   * @param protocol their protocol
+   * @return true only when continuity is positively established
+   */
+  public boolean chatFrameProvablyEmpty(UUID player, ProtocolVersion protocol) {
+    if (SeamlessProtocols.playerChat(protocol) == null) {
+      return false;
+    }
+    int[] received = signedChatSinceReset.get(player);
+    return received == null || received[0] == 0;
+  }
+
+  /**
+   * Notes a signed {@code player_chat} delivered to this client, if the protocol's layout is
+   * verified. An unreadable prefix counts as signed: the safe error is to block a seamless
+   * transfer, never to permit one on a message that could not be inspected.
+   */
+  public void observeDeliveredChat(UUID player, ByteBuf packet, ProtocolVersion protocol) {
+    SeamlessProtocols.PlayerChat shape = SeamlessProtocols.playerChat(protocol);
+    if (shape == null) {
+      return;
+    }
+    ByteBuf read = packet.duplicate();
+    boolean matched = false;
+    boolean signed = true;
+    try {
+      if (ProtocolUtils.readVarInt(read) != shape.id()) {
+        return;
+      }
+      matched = true;
+      for (int leading = 0; leading < shape.leadingVarInts(); leading++) {
+        ProtocolUtils.readVarInt(read);
+      }
+      read.skipBytes(Long.BYTES * 2);
+      ProtocolUtils.readVarInt(read);
+      signed = read.readBoolean();
+    } catch (RuntimeException unreadable) {
+      // Only a packet already identified as player_chat counts; a prefix that fails before the id
+      // is read is some other packet, not an unreadable chat message.
+      if (!matched) {
+        return;
+      }
+    }
+    if (signed) {
+      signedChatSinceReset.computeIfAbsent(player, key -> new int[1])[0]++;
+    }
+  }
+
+  /** Counts one opaque clientbound packet without consuming or retaining it. */
+  public void observeClientbound(UUID player, String backend, ByteBuf packet) {
+    // Keyed by the observing backend, not the destination: an earlier build reported the source
+    // visit's counts under the destination's name, which reads as the wrong hub's traffic.
+    Visit visit = clientboundIds.compute(player, (key, existing) ->
+        existing == null || !existing.backend.equals(backend) ? new Visit(backend) : existing);
+    Map<Integer, int[]> seen = visit.ids;
+    if (seen.size() >= 128) {
+      return;
+    }
+    try {
+      ByteBuf read = packet.duplicate();
+      int id = ProtocolUtils.readVarInt(read);
+      int[] tally = seen.computeIfAbsent(id, key -> new int[2]);
+      synchronized (tally) {
+        tally[0]++;
+        tally[1] = Math.max(tally[1], read.readableBytes());
+      }
+    } catch (RuntimeException unreadable) {
+      // An id that will not read cannot be attributed; drop it rather than mis-attribute a count.
+    }
+  }
+
+  /** Reports and resets the histogram for one backend visit. */
+  public void reportClientbound(UUID player, String destination, ProtocolVersion protocol) {
+    Visit visit = clientboundIds.remove(player);
+    if (visit == null || visit.ids.isEmpty()) {
+      return;
+    }
+    String backend = visit.backend;
+    StringBuilder line = new StringBuilder();
+    visit.ids.entrySet().stream()
+        .sorted(java.util.Map.Entry.comparingByKey())
+        .forEach(entry -> line.append(String.format(" 0x%02X x%d(max %dB)", entry.getKey(),
+            entry.getValue()[0], entry.getValue()[1])));
+    logger.info("Clientbound id histogram for {} observed on {} (now leaving for {}, protocol {}):{}."
+        + " Opaque PLAY packets only - anything this proxy decodes is absent. Observation only.",
+        player, backend, destination, protocol.getProtocol(), line);
+  }
+
+  /**
+   * Traces the proxy's mirror of the client's secure-chat state across a handoff. The mirror is
+   * discarded on JoinGame precisely because the client resets then, so a suppressed JoinGame would
+   * leave the proxy holding the client's frame while the destination starts empty. Whether that
+   * frame can be handed over is the open question; this only records it.
+   *
+   * @param player the player the event belongs to
+   * @param event what happened
+   * @param detail counts and offsets only, never message content or signatures
+   */
+  public void chatTrace(UUID player, String event, String detail) {
+    // Deliberately not restricted to the selected player: the chat validation kick was suffered by
+    // a second account on a different protocol, and tracing only the capture player is what left
+    // that transfer undocumented.
+    logger.info("Chat trace {}: {} [{}]. Observation only; no chat state is altered.",
+        player, event, detail);
+  }
+
+  /** Records protocol 763 JoinGame for the selected debugging session. */
+  public void legacyJoin(UUID player, String backend,
+      com.velocitypowered.proxy.protocol.packet.JoinGamePacket packet, ProtocolVersion protocol) {
+    if (selects(player) && protocol == ProtocolVersion.MINECRAFT_1_20) {
+      try {
+        legacy.join(player, backend, packet);
+      } catch (RuntimeException failure) {
+        legacy.clear();
+        logger.info("Legacy PLAY debug: JoinGame observation failed; baseline discarded.");
+      }
+    }
+  }
+
+  /** Observes legacy PLAY tags/features without consuming or retaining the live packet. */
+  public void legacyPacket(UUID player, String backend, io.netty.buffer.ByteBuf packet,
+      ProtocolVersion protocol) {
+    if (selects(player) && protocol == ProtocolVersion.MINECRAFT_1_20) {
+      try {
+        legacy.packet(player, backend, packet);
+      } catch (RuntimeException failure) {
+        legacy.clear();
+        logger.info("Legacy PLAY debug: packet observation failed; baseline discarded.");
+      }
+    }
+  }
+
   /** Drops a player's capture. Called when they disconnect, so nothing outlives a session. */
   public void clear(UUID player) {
+    clientboundIds.remove(player);
+    signedChatSinceReset.remove(player);
+    if (selects(player)) {
+      legacy.clear();
+    }
     if (baselines.remove(player) != null) {
       logger.debug("Dropped seamless capture for {}.", player);
     }

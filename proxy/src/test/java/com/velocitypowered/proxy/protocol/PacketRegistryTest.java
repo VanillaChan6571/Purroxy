@@ -58,6 +58,24 @@ class PacketRegistryTest {
   }
 
   @Test
+  void protocol764UsesItsOwnTeardownPacketIds() {
+    StateRegistry.PacketRegistry.ProtocolRegistry registry = StateRegistry.PLAY
+        .getProtocolRegistry(ProtocolUtils.Direction.CLIENTBOUND, ProtocolVersion.MINECRAFT_1_20_2);
+    assertEquals(0x40, registry.getPacketId(new RemoveEntitiesPacket(new int[] {1})));
+    assertEquals(0x5A, registry.getPacketId(new SetObjectivePacket("objective")));
+    assertEquals(0x5C, registry.getPacketId(new SetPlayerTeamPacket("team")));
+  }
+
+  @Test
+  void protocol765UsesItsOwnTeardownPacketIds() {
+    StateRegistry.PacketRegistry.ProtocolRegistry registry = StateRegistry.PLAY
+        .getProtocolRegistry(ProtocolUtils.Direction.CLIENTBOUND, ProtocolVersion.MINECRAFT_1_20_3);
+    assertEquals(0x40, registry.getPacketId(new RemoveEntitiesPacket(new int[] {1})));
+    assertEquals(0x5C, registry.getPacketId(new SetObjectivePacket("objective")));
+    assertEquals(0x5E, registry.getPacketId(new SetPlayerTeamPacket("team")));
+  }
+
+  @Test
   void packetRegistryWorks() {
     StateRegistry.PacketRegistry registry = setupRegistry();
     MinecraftPacket packet = registry.getProtocolRegistry(MINECRAFT_1_12).createPacket(0);

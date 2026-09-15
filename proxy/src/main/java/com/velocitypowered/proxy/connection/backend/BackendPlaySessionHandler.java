@@ -586,6 +586,14 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
 
   @Override
   public void handleUnknown(ByteBuf buf) {
+    if (server.getDiscovery() != null && server.getDiscovery().captures() != null) {
+      server.getDiscovery().captures().legacyPacket(serverConn.getPlayer().getUniqueId(),
+          serverConn.getServerInfo().getName(), buf, serverConn.getPlayer().getProtocolVersion());
+      server.getDiscovery().captures().observeClientbound(serverConn.getPlayer().getUniqueId(),
+          serverConn.getServerInfo().getName(), buf);
+      server.getDiscovery().captures().observeDeliveredChat(serverConn.getPlayer().getUniqueId(),
+          buf, serverConn.getPlayer().getProtocolVersion());
+    }
     observeEntityLifecycle(buf);
     // PLAY tags can change the configuration a baseline was captured from, and this proxy does not
     // register the PLAY form of that packet, so it arrives here opaquely and has to be recognised

@@ -158,6 +158,7 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
     // Move into the PLAY phase.
     MinecraftConnection smc = serverConn.ensureConnected();
     if (smc.getProtocolVersion().lessThan(ProtocolVersion.MINECRAFT_1_20_2)) {
+      markLegacySeamless(smc);
       smc.setActiveSessionHandler(StateRegistry.PLAY, new TransitionSessionHandler(server, serverConn, resultFuture));
     } else {
       if (tryDetachedConfiguration(smc)) {
@@ -204,6 +205,32 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
     return true;
   }
 
+  /**
+   * Marks a pre-1.20.2 arrival as a candidate for keeping its client in PLAY.
+   *
+   * <p>These protocols never reach {@link #tryDetachedConfiguration}: they have no configuration
+   * phase, so this handler sends them straight to PLAY. Everything the detached path refuses for
+   * still applies, except the captured configuration baseline, which cannot exist here. Whether
+   * the client is actually spared its reset is decided later, from the destination's JoinGame.
+   */
+  private void markLegacySeamless(MinecraftConnection backend) {
+    ConnectedPlayer player = serverConn.getPlayer();
+    VelocityServerConnection source = player.getConnectedServer();
+    String refusal = detachedRefusal(player, source, null, backend, true);
+    if (!refusal.isEmpty()) {
+      // Same reporting rule as the detached path: only real switches, never an initial login.
+      if (source != null && source.isActive()
+          && player.getConnection().getActiveSessionHandler() instanceof ClientPlaySessionHandler) {
+        logger.info("Legacy seamless switch to {} not attempted: {}. Client protocol {}, proxy"
+            + " negotiated {}, destination link {}.", serverConn.getServerInfo().getName(),
+            refusal, originalProtocol(player), player.getProtocolVersion().getProtocol(),
+            backend.getProtocolVersion().getProtocol());
+      }
+      return;
+    }
+    serverConn.legacySeamlessArrival = true;
+  }
+
   private boolean tryDetachedConfiguration(MinecraftConnection backend) {
     ConnectedPlayer player = serverConn.getPlayer();
     VelocityServerConnection source = player.getConnectedServer();
@@ -211,7 +238,7 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
     if (serverConn.detachedAttempted) {
       return false; // The visible retry after a failed probe, which already reported itself.
     }
-    String refusal = detachedRefusal(player, source, baseline, backend);
+    String refusal = detachedRefusal(player, source, baseline, backend, false);
     if (!refusal.isEmpty()) {
       // A switch that could have been seamless and was not is otherwise invisible: the client just
       // reconfigures and reloads terrain with nothing recording why. Only report real switches - an
@@ -328,7 +355,7 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
    * one is met. Split out from the attempt so a refusal can say which condition actually failed.
    */
   private String detachedRefusal(ConnectedPlayer player, VelocityServerConnection source,
-      SeamlessConfiguration.Baseline baseline, MinecraftConnection backend) {
+      SeamlessConfiguration.Baseline baseline, MinecraftConnection backend, boolean legacy) {
     if (source == null || !source.isActive()) {
       return "there is no live source server to hand over from";
     }
@@ -351,7 +378,10 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
       // and only the native form has been qualified.
       return "the client is translated from protocol " + original + " rather than native";
     }
-    if (baseline == null) {
+    // Below 1.20.2 there is no configuration phase to capture, so demanding a baseline would
+    // refuse every legacy arrival for lacking something it can never have. Those protocols are
+    // judged on the destination JoinGame instead, in ClientPlaySessionHandler.
+    if (!legacy && baseline == null) {
       return "this client has no captured configuration to compare the destination against";
     }
     if (!SeamlessProtocols.eligible(server, backend.getProtocolVersion())) {

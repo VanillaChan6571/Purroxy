@@ -71,6 +71,7 @@ public class VelocityServerConnection implements MinecraftConnectionAssociation,
   private boolean clientLoaded = false; // 1.21.4+
   boolean detachedAttempted;
   boolean detachedConfiguration;
+  boolean legacySeamlessArrival;
   @Nullable VelocityServerConnection detachedSource;
   SeamlessConfiguration.@Nullable Baseline detachedBaseline;
   private boolean gracefulDisconnect = false;
@@ -83,6 +84,20 @@ public class VelocityServerConnection implements MinecraftConnectionAssociation,
   /** Whether this connection negotiated configuration while its client stayed in PLAY. */
   public boolean isDetachedConfiguration() {
     return detachedConfiguration;
+  }
+
+  /**
+   * Whether this connection is a pre-1.20.2 arrival that may keep its client in PLAY.
+   *
+   * <p>Below 1.20.2 there is no configuration phase to detach from, so
+   * {@link #isDetachedConfiguration()} can never be true however well the destination matches. The
+   * equivalence those protocols rely on instead is the destination's JoinGame, which carries the
+   * registry inline, while tags and feature flags arrive in PLAY and are forwarded normally rather
+   * than absorbed. This says only that the arrival is a candidate; the JoinGame comparison and the
+   * entity, chat and id checks in {@code ClientPlaySessionHandler} still decide.
+   */
+  public boolean isLegacySeamlessArrival() {
+    return legacySeamlessArrival;
   }
 
   /** Publishes the normal negotiation only after this backend becomes the client's owner. */

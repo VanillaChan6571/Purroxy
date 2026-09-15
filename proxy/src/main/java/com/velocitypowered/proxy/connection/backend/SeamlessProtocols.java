@@ -34,7 +34,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * both directions. Anything else at or above {@link #FLOOR} is a canary: the transfer machinery is
  * version-neutral, so a family works or not on its own evidence, and stays off until an operator
  * has produced that evidence themselves. Below the floor nothing is eligible however it is
- * configured, because nothing there can work.
+ * configured, because this implementation does not support them.
  */
 public final class SeamlessProtocols {
 
@@ -47,17 +47,13 @@ public final class SeamlessProtocols {
   private static final Set<ProtocolVersion> QUALIFIED = Set.of(ProtocolVersion.MINECRAFT_26_2);
 
   /**
-   * The oldest protocol that can work at all. Below it, configuration cannot enable anything.
-   *
-   * <p>A capture only becomes a baseline once it holds the client's known-packs reply, and
-   * {@code KnownPacksPacket} exists only from 1.20.5 - so an older connection negotiates to
-   * completion and still produces nothing, silently. 1.20.5 is also where the per-registry sync
-   * shape that the comparison parses was introduced, and below 1.20.2 there is no configuration
-   * phase on the wire for the proxy to absorb in the first place. An entry under this floor would
-   * therefore not name an unqualified protocol but a broken one, so it is refused here rather than
-   * left to fail further in.
+   * Oldest implemented canary: 1.20/1.20.1 (763). 763 has no configuration phase at all, so it
+   * cannot produce the captured CONFIG baseline every other protocol here is judged against; its
+   * equivalence comes from the destination's JoinGame instead, which carries the registry inline.
+   * Tags and feature flags arrive in PLAY and are forwarded normally rather than absorbed. Earlier
+   * versions remain excluded until their packet mappings are enumerated and tested.
    */
-  static final ProtocolVersion FLOOR = ProtocolVersion.MINECRAFT_1_20_5;
+  static final ProtocolVersion FLOOR = ProtocolVersion.MINECRAFT_1_20;
 
   /**
    * The clientbound PLAY {@code update_tags} packet id, per protocol.
@@ -75,6 +71,11 @@ public final class SeamlessProtocols {
    * silently never fire and a stale baseline is the one failure this code exists to prevent.
    */
   private static final Map<ProtocolVersion, Integer> PLAY_UPDATE_TAGS = Map.ofEntries(
+      // 1.20.1 ConnectionProtocol, corroborated live: 0x6E carried the 33689-byte payload.
+      Map.entry(ProtocolVersion.MINECRAFT_1_20, 0x6E),
+      // ViaVersion ClientboundPackets1_20_2 and ClientboundPackets1_20_3.
+      Map.entry(ProtocolVersion.MINECRAFT_1_20_2, 0x70),
+      Map.entry(ProtocolVersion.MINECRAFT_1_20_3, 0x74),
       Map.entry(ProtocolVersion.MINECRAFT_1_20_5, 0x78),
       Map.entry(ProtocolVersion.MINECRAFT_1_21, 0x78),
       Map.entry(ProtocolVersion.MINECRAFT_1_21_2, 0x7F),
@@ -124,13 +125,47 @@ public final class SeamlessProtocols {
    * into {@code add_entity}. Absent is not an error here, just one fewer packet to watch.
    */
   private static final Map<ProtocolVersion, Integer> PLAY_ADD_EXPERIENCE_ORB = Map.of(
+      ProtocolVersion.MINECRAFT_1_20, 0x02,
+      ProtocolVersion.MINECRAFT_1_20_2, 0x02,
+      ProtocolVersion.MINECRAFT_1_20_3, 0x02,
       ProtocolVersion.MINECRAFT_1_20_5, 0x02,
       ProtocolVersion.MINECRAFT_1_21, 0x02,
       ProtocolVersion.MINECRAFT_1_21_2, 0x02,
       ProtocolVersion.MINECRAFT_1_21_4, 0x02);
 
+  /**
+   * How to find the signature flag in clientbound PLAY {@code player_chat}, per protocol.
+   *
+   * <p>A signature on a received message is what advances the client's {@code lastSeenMessages}
+   * tracker, and that tracker is what a suppressed JoinGame leaves stale. The layout is not
+   * constant: 1.20.1 reads sender UUID then a VarInt index, while 26.2 prefixes a VarInt
+   * {@code globalIndex} first, so the number of leading VarInts has to be carried with the id.
+   *
+   * <p>Only protocols whose id and layout have been read from that version's own sources belong
+   * here. An absent protocol means chat continuity cannot be proven, and the caller must fall back
+   * to a visible transfer rather than guess - a wrong id here reads some unrelated packet and
+   * reports continuity that does not exist.
+   */
+  public record PlayerChat(int id, int leadingVarInts) {}
+
+  private static final Map<ProtocolVersion, PlayerChat> PLAY_PLAYER_CHAT = Map.of(
+      // 1.20.1 ConnectionProtocol, cross-checked live: 0x6E carried the 33689-byte tags payload
+      // and 0x68 the 29-byte teleports, which is the enumeration this id comes from.
+      ProtocolVersion.MINECRAFT_1_20, new PlayerChat(0x35, 0),
+      // 26.2 GameProtocols, cross-checked live: 0x41 carried 101 packets of up to 709 bytes over a
+      // seven-minute chat session, and none during a four-second visit with no chat.
+      ProtocolVersion.MINECRAFT_26_2, new PlayerChat(0x41, 1));
+
+  /** The clientbound {@code player_chat} layout for a protocol, or null when unverified. */
+  public static @Nullable PlayerChat playerChat(ProtocolVersion protocol) {
+    return PLAY_PLAYER_CHAT.get(protocol);
+  }
+
   /** Clientbound PLAY {@code remove_entities}, mirroring the encode-only registration. */
   private static final Map<ProtocolVersion, Integer> PLAY_REMOVE_ENTITIES = Map.ofEntries(
+      Map.entry(ProtocolVersion.MINECRAFT_1_20, 0x3E),
+      Map.entry(ProtocolVersion.MINECRAFT_1_20_2, 0x40),
+      Map.entry(ProtocolVersion.MINECRAFT_1_20_3, 0x40),
       Map.entry(ProtocolVersion.MINECRAFT_1_20_5, 0x42),
       Map.entry(ProtocolVersion.MINECRAFT_1_21, 0x42),
       Map.entry(ProtocolVersion.MINECRAFT_1_21_2, 0x47),

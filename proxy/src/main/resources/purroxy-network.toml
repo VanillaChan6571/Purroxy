@@ -9,11 +9,11 @@ fallback = ["hub"]
 # that family has been soaked in both directions: a listed protocol is one you have qualified,
 # not one this proxy vouches for. Empty by default.
 #
-# 1.20.5 (766) is the oldest that can work at all - older clients negotiate no known-packs reply,
-# so they can never produce a baseline to compare against, and older ones still have no
-# configuration phase for the proxy to absorb. Anything below 766, and anything this build does
-# not have a protocol table for, is refused at startup and logged rather than silently ignored.
+# 1.20.2 (764) is the implemented floor. It captures configuration without
+# known-packs and requires byte-identical whole-registry data. Earlier protocols are refused.
+# Accepted canaries emit a startup warning and need live testing in both directions.
 #
+#   764 = 1.20.2         765 = 1.20.3/1.20.4
 #   766 = 1.20.5/1.20.6   767 = 1.21/1.21.1   768 = 1.21.2/1.21.3   769 = 1.21.4
 #   770 = 1.21.5          771 = 1.21.6        772 = 1.21.7/1.21.8   773 = 1.21.9/1.21.10
 #   774 = 1.21.11         775 = 26.1.x
@@ -23,6 +23,8 @@ fallback = ["hub"]
 # Retains one player's minecraft:worldgen/biome payload so a configuration mismatch can be
 # explained rather than only reported. One account, one registry, dropped when replaced or on
 # disconnect. Leave unset unless you are actively investigating a canary protocol.
+# For protocol 763 this also logs legacy JoinGame and PLAY tags/features comparisons.
+# Normal visible transfers remain enabled during that debugging session.
 # seamless-capture-player = "00000000-0000-0000-0000-000000000000"
 
 # Hold a player in the proxy for this many seconds when no backend will take them, instead of

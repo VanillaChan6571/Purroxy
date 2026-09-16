@@ -557,10 +557,15 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
     }
     int addOrb = SeamlessProtocols.playAddExperienceOrbId(protocol);
     int removeEntities = SeamlessProtocols.playRemoveEntitiesId(protocol);
+    // Same id-then-UUID prefix as add_entity; see SeamlessProtocols for why a version may spawn
+    // through one, the other, or both.
+    int addMob = SeamlessProtocols.playAddMobId(protocol);
+    int addPlayer = SeamlessProtocols.playAddPlayerId(protocol);
     ByteBuf reading = buf.duplicate();
     try {
       int packetId = com.velocitypowered.proxy.protocol.ProtocolUtils.readVarInt(reading);
-      if (packetId == addEntity) {
+      if (packetId == addEntity || addMob >= 0 && packetId == addMob
+          || addPlayer >= 0 && packetId == addPlayer) {
         int entityId = com.velocitypowered.proxy.protocol.ProtocolUtils.readVarInt(reading);
         // add_entity is id then UUID. The UUID is what ties a player-type entity to the profile
         // the client needs in its player list before it can render one.

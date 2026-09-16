@@ -36,7 +36,8 @@ class SeamlessProtocolsTest {
 
   /** Every protocol this build is willing to let an operator qualify. */
   static Set<ProtocolVersion> band() {
-    return Set.of(ProtocolVersion.MINECRAFT_1_20, ProtocolVersion.MINECRAFT_1_20_2,
+    return Set.of(ProtocolVersion.MINECRAFT_1_16_4,
+        ProtocolVersion.MINECRAFT_1_20, ProtocolVersion.MINECRAFT_1_20_2,
         ProtocolVersion.MINECRAFT_1_20_3, ProtocolVersion.MINECRAFT_1_20_5, ProtocolVersion.MINECRAFT_1_21,
         ProtocolVersion.MINECRAFT_1_21_2, ProtocolVersion.MINECRAFT_1_21_4,
         ProtocolVersion.MINECRAFT_1_21_5, ProtocolVersion.MINECRAFT_1_21_6,

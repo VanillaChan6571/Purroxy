@@ -157,6 +157,11 @@ public final class SeamlessCaptures {
    * @return true only when continuity is positively established
    */
   public boolean chatFrameProvablyEmpty(UUID player, ProtocolVersion protocol) {
+    if (!SeamlessProtocols.hasSignedChat(protocol)) {
+      // Nothing to accumulate before 1.19, so the frame is empty by construction rather than by
+      // observation. Distinct from an unverified layout below, which refuses.
+      return true;
+    }
     if (SeamlessProtocols.playerChat(protocol) == null) {
       return false;
     }

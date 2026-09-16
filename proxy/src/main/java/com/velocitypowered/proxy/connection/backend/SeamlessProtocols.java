@@ -47,13 +47,17 @@ public final class SeamlessProtocols {
   private static final Set<ProtocolVersion> QUALIFIED = Set.of(ProtocolVersion.MINECRAFT_26_2);
 
   /**
-   * Oldest implemented canary: 1.20/1.20.1 (763). 763 has no configuration phase at all, so it
-   * cannot produce the captured CONFIG baseline every other protocol here is judged against; its
-   * equivalence comes from the destination's JoinGame instead, which carries the registry inline.
-   * Tags and feature flags arrive in PLAY and are forwarded normally rather than absorbed. Earlier
-   * versions remain excluded until their packet mappings are enumerated and tested.
+   * Oldest implemented canary: 1.16.4/1.16.5 (754). From 763 down there is no configuration phase,
+   * so equivalence comes from the destination's JoinGame, which carries the registry inline from
+   * 1.16.2 onwards; tags and feature flags arrive in PLAY and are forwarded normally. Below 1.19
+   * there is no signed chat either, so the acknowledgement history a suppressed JoinGame would
+   * strand cannot exist.
+   *
+   * <p>Being at or above this floor is necessary and not sufficient: a protocol also needs an
+   * entry in every id table below, which is what keeps 755-762 out. Below 1.16.2 the registry
+   * leaves JoinGame and there is nothing left to prove equivalence with.
    */
-  static final ProtocolVersion FLOOR = ProtocolVersion.MINECRAFT_1_20;
+  static final ProtocolVersion FLOOR = ProtocolVersion.MINECRAFT_1_16_4;
 
   /**
    * The clientbound PLAY {@code update_tags} packet id, per protocol.
@@ -71,6 +75,9 @@ public final class SeamlessProtocols {
    * silently never fire and a stale baseline is the one failure this code exists to prevent.
    */
   private static final Map<ProtocolVersion, Integer> PLAY_UPDATE_TAGS = Map.ofEntries(
+      // 1.16.5 ConnectionProtocol, read from the remapped client jar. Cross-checks against
+      // Velocity's own clientbound chat mapping, which is 0x0E at 1.16 as that enumeration says.
+      Map.entry(ProtocolVersion.MINECRAFT_1_16_4, 0x5B),
       // 1.20.1 ConnectionProtocol, corroborated live: 0x6E carried the 33689-byte payload.
       Map.entry(ProtocolVersion.MINECRAFT_1_20, 0x6E),
       // ViaVersion ClientboundPackets1_20_2 and ClientboundPackets1_20_3.
@@ -115,16 +122,34 @@ public final class SeamlessProtocols {
   }
 
   /**
-   * Clientbound PLAY {@code add_entity}. Constant across the whole band, unlike most ids; asserted
-   * in {@code SeamlessProtocolsTest} so a future protocol that moves it cannot pass unnoticed.
+   * Clientbound PLAY {@code add_entity}. This was a constant, on the premise that it does not move
+   * across the band. Extending the floor to 1.16.4 disproved that: the bundle packet takes 0x00
+   * from 1.19.4 onwards and pushes add_entity to 0x01, while 1.16.5 has no bundle packet and puts
+   * add_entity at 0x00. The test that asserted the constant is what caught it.
    */
-  private static final int PLAY_ADD_ENTITY = 0x01;
+  private static final Map<ProtocolVersion, Integer> PLAY_ADD_ENTITY = Map.ofEntries(
+      Map.entry(ProtocolVersion.MINECRAFT_1_16_4, 0x00),
+      Map.entry(ProtocolVersion.MINECRAFT_1_20, 0x01),
+      Map.entry(ProtocolVersion.MINECRAFT_1_20_2, 0x01),
+      Map.entry(ProtocolVersion.MINECRAFT_1_20_3, 0x01),
+      Map.entry(ProtocolVersion.MINECRAFT_1_20_5, 0x01),
+      Map.entry(ProtocolVersion.MINECRAFT_1_21, 0x01),
+      Map.entry(ProtocolVersion.MINECRAFT_1_21_2, 0x01),
+      Map.entry(ProtocolVersion.MINECRAFT_1_21_4, 0x01),
+      Map.entry(ProtocolVersion.MINECRAFT_1_21_5, 0x01),
+      Map.entry(ProtocolVersion.MINECRAFT_1_21_6, 0x01),
+      Map.entry(ProtocolVersion.MINECRAFT_1_21_7, 0x01),
+      Map.entry(ProtocolVersion.MINECRAFT_1_21_9, 0x01),
+      Map.entry(ProtocolVersion.MINECRAFT_1_21_11, 0x01),
+      Map.entry(ProtocolVersion.MINECRAFT_26_1, 0x01),
+      Map.entry(ProtocolVersion.MINECRAFT_26_2, 0x01));
 
   /**
    * Clientbound PLAY {@code add_experience_orb}, which exists only up to 1.21.4 - 1.21.5 folded it
    * into {@code add_entity}. Absent is not an error here, just one fewer packet to watch.
    */
   private static final Map<ProtocolVersion, Integer> PLAY_ADD_EXPERIENCE_ORB = Map.of(
+      ProtocolVersion.MINECRAFT_1_16_4, 0x01,
       ProtocolVersion.MINECRAFT_1_20, 0x02,
       ProtocolVersion.MINECRAFT_1_20_2, 0x02,
       ProtocolVersion.MINECRAFT_1_20_3, 0x02,
@@ -156,6 +181,22 @@ public final class SeamlessProtocols {
       // seven-minute chat session, and none during a four-second visit with no chat.
       ProtocolVersion.MINECRAFT_26_2, new PlayerChat(0x41, 1));
 
+  /**
+   * Whether this protocol has signed chat at all.
+   *
+   * <p>Signed chat arrives in 1.19. Below that a client keeps no last-seen acknowledgement window
+   * and no signature cache, so there is nothing a suppressed JoinGame could strand and nothing a
+   * destination's empty validator could reject. That is a different answer from "this protocol's
+   * player_chat layout has not been verified", which must refuse; here there is positively
+   * nothing to carry, so continuity holds without an id to check.
+   *
+   * @param protocol the client's protocol
+   * @return true when the client can accumulate signed-chat history
+   */
+  public static boolean hasSignedChat(@Nullable ProtocolVersion protocol) {
+    return protocol != null && protocol.noLessThan(ProtocolVersion.MINECRAFT_1_19);
+  }
+
   /** The clientbound {@code player_chat} layout for a protocol, or null when unverified. */
   public static @Nullable PlayerChat playerChat(ProtocolVersion protocol) {
     return PLAY_PLAYER_CHAT.get(protocol);
@@ -163,6 +204,7 @@ public final class SeamlessProtocols {
 
   /** Clientbound PLAY {@code remove_entities}, mirroring the encode-only registration. */
   private static final Map<ProtocolVersion, Integer> PLAY_REMOVE_ENTITIES = Map.ofEntries(
+      Map.entry(ProtocolVersion.MINECRAFT_1_16_4, 0x36),
       Map.entry(ProtocolVersion.MINECRAFT_1_20, 0x3E),
       Map.entry(ProtocolVersion.MINECRAFT_1_20_2, 0x40),
       Map.entry(ProtocolVersion.MINECRAFT_1_20_3, 0x40),
@@ -178,9 +220,41 @@ public final class SeamlessProtocols {
       Map.entry(ProtocolVersion.MINECRAFT_26_1, 0x4D),
       Map.entry(ProtocolVersion.MINECRAFT_26_2, 0x4D));
 
+  /**
+   * Clientbound PLAY {@code add_mob} and {@code add_player}, where they exist.
+   *
+   * <p>Both carry the same prefix as {@code add_entity} - a VarInt entity id then a UUID, verified
+   * against 1.16.5's own packet classes - so the ledger reads them identically. They are listed
+   * because the spawn packet a version uses is not constant: 1.19 folded living entities into
+   * {@code add_entity}, and 1.20.2 removed {@code add_player} in turn. At 1.16.5 an armour stand
+   * arrives as {@code add_mob} and an NPC as {@code add_player}, so a ledger watching only
+   * {@code add_entity} observes nothing at all - which is exactly what the first live 754 switch
+   * showed: "0 only this proxy saw", against 8 at 763.
+   *
+   * <p>That matters because the proxy's own observation is the safety net for entities the
+   * backend's tracker never held. Those are removed from the ledger rather than from the client,
+   * and on every 763 switch so far there have been eight of them.
+   */
+  private static final Map<ProtocolVersion, Integer> PLAY_ADD_MOB = Map.of(
+      ProtocolVersion.MINECRAFT_1_16_4, 0x02);
+
+  private static final Map<ProtocolVersion, Integer> PLAY_ADD_PLAYER = Map.of(
+      ProtocolVersion.MINECRAFT_1_16_4, 0x04,
+      ProtocolVersion.MINECRAFT_1_20, 0x03);
+
+  /** The clientbound PLAY {@code add_mob} id, or {@code -1} where the version has none. */
+  static int playAddMobId(@Nullable ProtocolVersion protocol) {
+    return protocol == null ? -1 : PLAY_ADD_MOB.getOrDefault(protocol, -1);
+  }
+
+  /** The clientbound PLAY {@code add_player} id, or {@code -1} where the version has none. */
+  static int playAddPlayerId(@Nullable ProtocolVersion protocol) {
+    return protocol == null ? -1 : PLAY_ADD_PLAYER.getOrDefault(protocol, -1);
+  }
+
   /** The clientbound PLAY {@code add_entity} id, or {@code -1} outside the band. */
   static int playAddEntityId(@Nullable ProtocolVersion protocol) {
-    return canaryable(protocol) ? PLAY_ADD_ENTITY : -1;
+    return protocol == null ? -1 : PLAY_ADD_ENTITY.getOrDefault(protocol, -1);
   }
 
   /** The clientbound PLAY {@code add_experience_orb} id, or {@code -1} where it does not exist. */

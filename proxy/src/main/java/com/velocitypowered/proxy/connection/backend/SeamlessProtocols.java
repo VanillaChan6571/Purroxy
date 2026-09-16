@@ -74,6 +74,7 @@ public final class SeamlessProtocols {
    * <p>A protocol absent from here cannot be made eligible, because the invalidation below would
    * silently never fire and a stale baseline is the one failure this code exists to prevent.
    */
+  // 26.3 ids below were verified against GameProtocols in the official 26.3 client jar.
   private static final Map<ProtocolVersion, Integer> PLAY_UPDATE_TAGS = Map.ofEntries(
       // 1.16.5 ConnectionProtocol, read from the remapped client jar. Cross-checks against
       // Velocity's own clientbound chat mapping, which is 0x0E at 1.16 as that enumeration says.
@@ -93,7 +94,8 @@ public final class SeamlessProtocols {
       Map.entry(ProtocolVersion.MINECRAFT_1_21_9, 0x84),
       Map.entry(ProtocolVersion.MINECRAFT_1_21_11, 0x84),
       Map.entry(ProtocolVersion.MINECRAFT_26_1, 0x86),
-      Map.entry(ProtocolVersion.MINECRAFT_26_2, 0x86));
+      Map.entry(ProtocolVersion.MINECRAFT_26_2, 0x86),
+      Map.entry(ProtocolVersion.MINECRAFT_26_3, 0x89));
 
   private SeamlessProtocols() {
   }
@@ -142,7 +144,8 @@ public final class SeamlessProtocols {
       Map.entry(ProtocolVersion.MINECRAFT_1_21_9, 0x01),
       Map.entry(ProtocolVersion.MINECRAFT_1_21_11, 0x01),
       Map.entry(ProtocolVersion.MINECRAFT_26_1, 0x01),
-      Map.entry(ProtocolVersion.MINECRAFT_26_2, 0x01));
+      Map.entry(ProtocolVersion.MINECRAFT_26_2, 0x01),
+      Map.entry(ProtocolVersion.MINECRAFT_26_3, 0x01));
 
   /**
    * Clientbound PLAY {@code add_experience_orb}, which exists only up to 1.21.4 - 1.21.5 folded it
@@ -179,7 +182,10 @@ public final class SeamlessProtocols {
       ProtocolVersion.MINECRAFT_1_20, new PlayerChat(0x35, 0),
       // 26.2 GameProtocols, cross-checked live: 0x41 carried 101 packets of up to 709 bytes over a
       // seven-minute chat session, and none during a four-second visit with no chat.
-      ProtocolVersion.MINECRAFT_26_2, new PlayerChat(0x41, 1));
+      ProtocolVersion.MINECRAFT_26_2, new PlayerChat(0x41, 1),
+      // 26.3 GameProtocols and ClientboundPlayerChatPacket.STREAM_CODEC, read from the client jar:
+      // globalIndex VarInt, sender UUID, index VarInt, optional signature.
+      ProtocolVersion.MINECRAFT_26_3, new PlayerChat(0x42, 1));
 
   /**
    * Whether this protocol has signed chat at all.
@@ -218,7 +224,8 @@ public final class SeamlessProtocols {
       Map.entry(ProtocolVersion.MINECRAFT_1_21_9, 0x4B),
       Map.entry(ProtocolVersion.MINECRAFT_1_21_11, 0x4B),
       Map.entry(ProtocolVersion.MINECRAFT_26_1, 0x4D),
-      Map.entry(ProtocolVersion.MINECRAFT_26_2, 0x4D));
+      Map.entry(ProtocolVersion.MINECRAFT_26_2, 0x4D),
+      Map.entry(ProtocolVersion.MINECRAFT_26_3, 0x4E));
 
   /**
    * Clientbound PLAY {@code add_mob} and {@code add_player}, where they exist.

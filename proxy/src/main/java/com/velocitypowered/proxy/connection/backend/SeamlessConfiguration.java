@@ -314,6 +314,7 @@ public final class SeamlessConfiguration {
   private static boolean supported(MinecraftPacket packet) {
     return packet instanceof KnownPacksPacket || packet instanceof RegistrySyncPacket
         || packet instanceof ActiveFeaturesPacket || packet instanceof TagsUpdatePacket
+        || packet instanceof com.velocitypowered.proxy.protocol.packet.ClientboundPostEffectsPacket
         || packet instanceof com.velocitypowered.proxy.protocol.packet.PluginMessagePacket message
             && com.velocitypowered.proxy.protocol.util.PluginMessageUtil.isMcBrand(message)
         || packet instanceof com.velocitypowered.proxy.protocol.packet.config.ClientboundCustomReportDetailsPacket

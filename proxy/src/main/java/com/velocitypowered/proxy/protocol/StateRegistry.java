@@ -645,7 +645,8 @@ public enum StateRegistry {
           map(0x47, MINECRAFT_1_21_2, true),
           map(0x46, MINECRAFT_1_21_5, true),
           map(0x4B, MINECRAFT_1_21_9, true),
-          map(0x4D, MINECRAFT_26_1, true));
+          map(0x4D, MINECRAFT_26_1, true),
+          map(0x4E, MINECRAFT_26_3, true));
       clientbound.register(
           SetObjectivePacket.class,
           SetObjectivePacket::new,
@@ -657,7 +658,8 @@ public enum StateRegistry {
           map(0x64, MINECRAFT_1_21_2, true),
           map(0x63, MINECRAFT_1_21_5, true),
           map(0x68, MINECRAFT_1_21_9, true),
-          map(0x6A, MINECRAFT_26_1, true));
+          map(0x6A, MINECRAFT_26_1, true),
+          map(0x6C, MINECRAFT_26_3, true));
       clientbound.register(
           SetPlayerTeamPacket.class,
           SetPlayerTeamPacket::new,
@@ -669,7 +671,8 @@ public enum StateRegistry {
           map(0x67, MINECRAFT_1_21_2, true),
           map(0x66, MINECRAFT_1_21_5, true),
           map(0x6B, MINECRAFT_1_21_9, true),
-          map(0x6D, MINECRAFT_26_1, true));
+          map(0x6D, MINECRAFT_26_1, true),
+          map(0x6F, MINECRAFT_26_3, true));
       clientbound.register(
           RemoveResourcePackPacket.class,
           RemoveResourcePackPacket::new,

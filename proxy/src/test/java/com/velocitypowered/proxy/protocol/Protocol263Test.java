@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.velocitypowered.api.network.ProtocolVersion;
 import com.velocitypowered.proxy.connection.backend.SeamlessProtocols;
@@ -41,6 +42,12 @@ class Protocol263Test {
         ProtocolUtils.Direction.CLIENTBOUND, ProtocolVersion.MINECRAFT_26_3);
     var previous = StateRegistry.PLAY.getProtocolRegistry(
         ProtocolUtils.Direction.CLIENTBOUND, ProtocolVersion.MINECRAFT_26_2);
+    assertEquals(0x4E, current.getPacketId(new
+        com.velocitypowered.proxy.protocol.packet.RemoveEntitiesPacket(new int[] {1})));
+    assertEquals(0x6C, current.getPacketId(new
+        com.velocitypowered.proxy.protocol.packet.SetObjectivePacket("objective")));
+    assertEquals(0x6F, current.getPacketId(new
+        com.velocitypowered.proxy.protocol.packet.SetPlayerTeamPacket("team")));
     assertEquals(0x32, current.getPacketId(new JoinGamePacket()));
     assertEquals(0x54, current.getPacketId(new RespawnPacket()));
     assertEquals(0x31, previous.getPacketId(new JoinGamePacket()));
@@ -48,7 +55,7 @@ class Protocol263Test {
     assertInstanceOf(ClientboundPostEffectsPacket.class, current.createPacket(0x53));
     assertInstanceOf(ClientboundPostEffectsPacket.class, StateRegistry.CONFIG.getProtocolRegistry(
         ProtocolUtils.Direction.CLIENTBOUND, ProtocolVersion.MINECRAFT_26_3).createPacket(0x0A));
-    assertFalse(SeamlessProtocols.canaryable(ProtocolVersion.MINECRAFT_26_3));
+    assertTrue(SeamlessProtocols.canaryable(ProtocolVersion.MINECRAFT_26_3));
     assertFalse(SeamlessProtocols.eligible(null, ProtocolVersion.MINECRAFT_26_3));
   }
 

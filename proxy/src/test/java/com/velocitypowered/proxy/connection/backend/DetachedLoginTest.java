@@ -374,4 +374,13 @@ class DetachedLoginTest {
         com.velocitypowered.proxy.protocol.packet.config.ClientboundCustomReportDetailsPacket.class)));
     verify(player, times(2)).setSeamlessBaseline(null);
   }
+  @Test
+  void playPostEffectsInvalidateTheCapturedConfigurationAndAreForwarded() {
+    BackendPlaySessionHandler handler = new BackendPlaySessionHandler(server, target);
+    assertFalse(handler.handle(
+        new com.velocitypowered.proxy.protocol.packet.ClientboundPostEffectsPacket(
+            new net.kyori.adventure.key.Key[0])));
+    verify(player).setSeamlessBaseline(null);
+  }
+
 }

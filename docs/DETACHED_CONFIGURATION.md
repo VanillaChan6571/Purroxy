@@ -122,3 +122,19 @@ Use the new Purroxy jar with existing compatible Nekopur handoff builds. Check:
    fallback and completes through normal configuration. Test only on test hubs.
 6. Reconfiguration/reload, destination failure and reconnect still preserve the
    journal's recorded owner. Never expire a committed source fence to restore it.
+
+### Minecraft 26.3 canary (protocol 777)
+
+`seamless-canary-protocols = [777]` enables the 26.3 path explicitly. It is not
+qualified by default; a live two-backend soak is still required. Restart the proxy
+with the updated jar and reconnect the client to capture a fresh baseline.
+
+The official 26.3 client jar's `GameProtocols` registrations provide these PLAY
+IDs: add entity `0x01`, player chat `0x42`, remove entities `0x4E`, objective
+`0x6C`, team `0x6F`, and update tags `0x89`. Its player-chat codec starts with a
+VarInt global index, UUID sender, VarInt sender index, then the optional signature.
+
+Post-effects packets are captured and compared exactly during configuration;
+changed or omitted effects reject the detached attempt. A PLAY post-effects update
+invalidates the baseline. Signed-chat history still prevents seamless switching
+when the existing continuity checks cannot establish an empty client chat frame.

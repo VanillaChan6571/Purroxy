@@ -43,7 +43,7 @@ class SeamlessProtocolsTest {
         ProtocolVersion.MINECRAFT_1_21_5, ProtocolVersion.MINECRAFT_1_21_6,
         ProtocolVersion.MINECRAFT_1_21_7, ProtocolVersion.MINECRAFT_1_21_9,
         ProtocolVersion.MINECRAFT_1_21_11, ProtocolVersion.MINECRAFT_26_1,
-        ProtocolVersion.MINECRAFT_26_2);
+        ProtocolVersion.MINECRAFT_26_2, ProtocolVersion.MINECRAFT_26_3);
   }
 
   @Test
@@ -127,4 +127,32 @@ class SeamlessProtocolsTest {
           protocol + " (" + protocol.getProtocol() + ")");
     }
   }
+  @Test
+  void protocol777TracksItsOwnTagsEntitiesAndSignedChatWithoutConsumingPackets() {
+    ProtocolVersion version = ProtocolVersion.MINECRAFT_26_3;
+    assertEquals(0x89, SeamlessProtocols.playUpdateTagsId(version));
+    assertEquals(0x01, SeamlessProtocols.playAddEntityId(version));
+    assertEquals(0x4E, SeamlessProtocols.playRemoveEntitiesId(version));
+    SeamlessCaptures captures = new SeamlessCaptures();
+    java.util.UUID player = java.util.UUID.randomUUID();
+    io.netty.buffer.ByteBuf packet = io.netty.buffer.Unpooled.buffer();
+    try {
+      com.velocitypowered.proxy.protocol.ProtocolUtils.writeVarInt(packet, 0x42);
+      com.velocitypowered.proxy.protocol.ProtocolUtils.writeVarInt(packet, 130); // global index
+      packet.writeLong(1L).writeLong(2L); // sender
+      com.velocitypowered.proxy.protocol.ProtocolUtils.writeVarInt(packet, 0); // sender index
+      packet.writeBoolean(false);
+      captures.observeDeliveredChat(player, packet, version);
+      assertTrue(captures.chatFrameProvablyEmpty(player, version));
+      packet.setBoolean(packet.writerIndex() - 1, true);
+      captures.observeDeliveredChat(player, packet, version);
+      assertFalse(captures.chatFrameProvablyEmpty(player, version));
+      assertEquals(0, packet.readerIndex());
+      captures.resetChatFrame(player);
+      assertTrue(captures.chatFrameProvablyEmpty(player, version));
+    } finally {
+      packet.release();
+    }
+  }
+
 }

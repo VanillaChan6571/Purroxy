@@ -392,6 +392,48 @@ class SeamlessConfigurationTest {
     assertDoesNotThrow(() -> new SeamlessConfiguration(captured, VERSION));
   }
 
+  @Test
+  void protocol777PostEffectsMustMatchAndCannotBeOmitted() {
+    ProtocolVersion version = ProtocolVersion.MINECRAFT_26_3;
+    var effects = new com.velocitypowered.proxy.protocol.packet.ClientboundPostEffectsPacket(
+        new net.kyori.adventure.key.Key[] {net.kyori.adventure.key.Key.key("minecraft:test")});
+    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(version, true);
+    capture.observe(packs(version));
+    capture.select(packs(version));
+    RegistrySyncPacket sync = registry(1, version);
+    try {
+      capture.observe(sync);
+      capture.observe(new ActiveFeaturesPacket());
+      capture.observe(new TagsUpdatePacket());
+      capture.observe(effects);
+      capture.observe(FinishedUpdatePacket.INSTANCE);
+      var captured = capture.baseline().orElseThrow();
+      for (int outcome = 0; outcome < 3; outcome++) {
+        SeamlessConfiguration negotiation = new SeamlessConfiguration(captured, version);
+        negotiation.accept(packs(version));
+        negotiation.accept(sync);
+        negotiation.accept(new ActiveFeaturesPacket());
+        negotiation.accept(new TagsUpdatePacket());
+        if (outcome == 0) {
+          negotiation.accept(effects);
+          negotiation.accept(FinishedUpdatePacket.INSTANCE);
+          assertTrue(negotiation.complete());
+        } else if (outcome == 1) {
+          assertThrows(IllegalStateException.class, () -> negotiation.accept(
+              new com.velocitypowered.proxy.protocol.packet.ClientboundPostEffectsPacket(
+                  new net.kyori.adventure.key.Key[0])));
+          assertFalse(negotiation.complete());
+        } else {
+          assertThrows(IllegalStateException.class,
+              () -> negotiation.accept(FinishedUpdatePacket.INSTANCE));
+          assertFalse(negotiation.complete());
+        }
+      }
+    } finally {
+      sync.release();
+    }
+  }
+
   static SeamlessConfiguration.Baseline baseline() {
     return baseline(new TagsUpdatePacket());
   }

@@ -209,6 +209,14 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
   }
 
   @Override
+  public boolean handle(
+      com.velocitypowered.proxy.protocol.packet.ClientboundPostEffectsPacket packet) {
+    // PLAY updates replace effects captured in CONFIG, so that baseline is no longer current.
+    serverConn.getPlayer().setSeamlessBaseline(null);
+    return false; // forward
+  }
+
+  @Override
   public boolean handle(final ResourcePackRequestPacket packet) {
     serverConn.getPlayer().setSeamlessBaseline(null);
     final ResourcePackInfo.Builder builder = new VelocityResourcePackInfo.BuilderImpl(

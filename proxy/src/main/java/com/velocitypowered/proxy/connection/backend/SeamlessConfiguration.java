@@ -70,6 +70,31 @@ public final class SeamlessConfiguration {
     public ProtocolVersion protocol() {
       return protocol;
     }
+
+    /** Whether a PLAY update preserves the effects this configuration installed in the client. */
+    public boolean matchesPostEffects(
+        com.velocitypowered.proxy.protocol.packet.ClientboundPostEffectsPacket packet) {
+      try {
+        Fingerprint expected = null;
+        for (Fingerprint configured : packets) {
+          if (configured.type == packet.getClass()) {
+            expected = configured;
+          }
+        }
+        // 26.3 sends even an empty effects list after JoinGame. Without a CONFIG effects packet,
+        // the initial client state is empty; that routine PLAY update does not change it.
+        if (expected == null) {
+          var empty = new com.velocitypowered.proxy.protocol.packet.ClientboundPostEffectsPacket(
+              new net.kyori.adventure.key.Key[0]);
+          expected = fingerprint(empty,
+              encode(empty, ProtocolUtils.Direction.CLIENTBOUND, protocol), protocol);
+        }
+        return expected.matches(fingerprint(packet,
+            encode(packet, ProtocolUtils.Direction.CLIENTBOUND, protocol), protocol));
+      } catch (RuntimeException unreadable) {
+        return false;
+      }
+    }
   }
 
   /**

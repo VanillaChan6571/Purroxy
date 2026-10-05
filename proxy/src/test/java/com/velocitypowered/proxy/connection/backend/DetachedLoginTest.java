@@ -375,12 +375,80 @@ class DetachedLoginTest {
     verify(player, times(2)).setSeamlessBaseline(null);
   }
   @Test
-  void playPostEffectsInvalidateTheCapturedConfigurationAndAreForwarded() {
+  void emptyLoginPostEffectsKeepTheDefaultCapturedStateAndAreForwarded() {
+    when(player.seamlessBaseline()).thenReturn(
+        SeamlessConfigurationTest.baseline(ProtocolVersion.MINECRAFT_26_3));
     BackendPlaySessionHandler handler = new BackendPlaySessionHandler(server, target);
-    assertFalse(handler.handle(
-        new com.velocitypowered.proxy.protocol.packet.ClientboundPostEffectsPacket(
-            new net.kyori.adventure.key.Key[0])));
+    assertFalse(handler.handle(postEffects()));
+    verify(player, never()).setSeamlessBaseline(null);
+  }
+
+  @Test
+  void identicalPlayPostEffectsKeepTheConfiguredStateAndAreForwarded() {
+    when(player.seamlessBaseline()).thenReturn(postEffectsBaseline("minecraft:test"));
+    BackendPlaySessionHandler handler = new BackendPlaySessionHandler(server, target);
+    assertFalse(handler.handle(postEffects("minecraft:test")));
+    verify(player, never()).setSeamlessBaseline(null);
+  }
+
+  @Test
+  void nonemptyPlayPostEffectsInvalidateTheDefaultStateAndAreForwarded() {
+    when(player.seamlessBaseline()).thenReturn(
+        SeamlessConfigurationTest.baseline(ProtocolVersion.MINECRAFT_26_3));
+    BackendPlaySessionHandler handler = new BackendPlaySessionHandler(server, target);
+    assertFalse(handler.handle(postEffects("minecraft:test")));
     verify(player).setSeamlessBaseline(null);
+  }
+
+  @Test
+  void changedOrClearedPlayPostEffectsInvalidateConfiguredStateAndAreForwarded() {
+    when(player.seamlessBaseline()).thenReturn(postEffectsBaseline("minecraft:test"));
+    BackendPlaySessionHandler handler = new BackendPlaySessionHandler(server, target);
+    assertFalse(handler.handle(postEffects("minecraft:other")));
+    assertFalse(handler.handle(postEffects()));
+    verify(player, times(2)).setSeamlessBaseline(null);
+  }
+
+  @Test
+  void playPostEffectsDoNotRestoreAMissingBaselineAndAreForwarded() {
+    when(player.seamlessBaseline()).thenReturn(null);
+    BackendPlaySessionHandler handler = new BackendPlaySessionHandler(server, target);
+    assertFalse(handler.handle(postEffects()));
+    assertFalse(handler.handle(postEffects("minecraft:test")));
+    verify(player, never()).setSeamlessBaseline(
+        org.mockito.ArgumentMatchers.nullable(SeamlessConfiguration.Baseline.class));
+  }
+
+  private static com.velocitypowered.proxy.protocol.packet.ClientboundPostEffectsPacket postEffects(
+      String... effects) {
+    net.kyori.adventure.key.Key[] keys = new net.kyori.adventure.key.Key[effects.length];
+    for (int index = 0; index < effects.length; index++) {
+      keys[index] = net.kyori.adventure.key.Key.key(effects[index]);
+    }
+    return new com.velocitypowered.proxy.protocol.packet.ClientboundPostEffectsPacket(keys);
+  }
+
+  private static SeamlessConfiguration.Baseline postEffectsBaseline(String... effects) {
+    ProtocolVersion version = ProtocolVersion.MINECRAFT_26_3;
+    SeamlessConfiguration.Capture capture = new SeamlessConfiguration.Capture(version, true);
+    capture.observe(SeamlessConfigurationTest.packs());
+    capture.select(SeamlessConfigurationTest.packs());
+    com.velocitypowered.proxy.protocol.packet.config.RegistrySyncPacket registry =
+        new com.velocitypowered.proxy.protocol.packet.config.RegistrySyncPacket();
+    ByteBuf encoded = Unpooled.buffer().writeByte(1);
+    try {
+      registry.decode(encoded, com.velocitypowered.proxy.protocol.ProtocolUtils.Direction.CLIENTBOUND,
+          version);
+      capture.observe(registry);
+    } finally {
+      registry.release();
+      encoded.release();
+    }
+    capture.observe(new com.velocitypowered.proxy.protocol.packet.config.ActiveFeaturesPacket());
+    capture.observe(new com.velocitypowered.proxy.protocol.packet.config.TagsUpdatePacket());
+    capture.observe(postEffects(effects));
+    capture.observe(com.velocitypowered.proxy.protocol.packet.config.FinishedUpdatePacket.INSTANCE);
+    return capture.baseline().orElseThrow();
   }
 
 }

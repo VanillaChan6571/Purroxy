@@ -219,8 +219,12 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
   @Override
   public boolean handle(
       com.velocitypowered.proxy.protocol.packet.ClientboundPostEffectsPacket packet) {
-    // PLAY updates replace effects captured in CONFIG, so that baseline is no longer current.
-    serverConn.getPlayer().setSeamlessBaseline(null);
+    // 26.3 sends the effects after every join, including an unchanged empty list. Only a real
+    // change makes the captured configuration stale; never bypass comparison for changed effects.
+    SeamlessConfiguration.Baseline baseline = serverConn.getPlayer().seamlessBaseline();
+    if (baseline != null && !baseline.matchesPostEffects(packet)) {
+      serverConn.getPlayer().setSeamlessBaseline(null);
+    }
     return false; // forward
   }
 

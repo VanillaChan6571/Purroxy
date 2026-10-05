@@ -136,5 +136,8 @@ VarInt global index, UUID sender, VarInt sender index, then the optional signatu
 
 Post-effects packets are captured and compared exactly during configuration;
 changed or omitted effects reject the detached attempt. A PLAY post-effects update
-invalidates the baseline. Signed-chat history still prevents seamless switching
+invalidates the baseline only when its effects differ from the captured configuration
+(or the empty initial default if CONFIG sent no effects). Minecraft 26.3 routinely
+sends an empty effects list after JoinGame; this unchanged update retains the baseline.
+Signed-chat history still prevents seamless switching
 when the existing continuity checks cannot establish an empty client chat frame.
